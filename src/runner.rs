@@ -106,6 +106,15 @@ import pathlib
 import sys
 import traceback
 import re
+import inspect
+
+
+class _SkipTest(Exception):
+    pass
+
+
+class _XFailed(Exception):
+    pass
 
 
 def _normalize_parametrize(decorator):
@@ -132,7 +141,15 @@ def _is_fixture_decorator(decorator):
         if decorator.attr != "fixture":
             return False
         value = decorator.value
-        return isinstance(value, ast.Name) and value.id == "pytest" or isinstance(value, ast.Name) and value.id == "mark"
+        return (
+            (isinstance(value, ast.Name) and value.id in ("pytest", "mark", "oxtest"))
+            or (
+                isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in ("pytest", "oxtest")
+                and value.attr == "mark"
+            )
+        )
     if isinstance(decorator, ast.Name):
         return decorator.id == "fixture"
     return False
@@ -256,6 +273,8 @@ def fixtures_per_test(path):
 def load_module(path):
     path = pathlib.Path(path)
     _ensure_package_root(path)
+    _ensure_oxtest_module()
+    _ensure_pytest_module()
     module_name = f"oxtest_module_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
@@ -283,6 +302,101 @@ def _strip_param_id(name):
     return name
 
 
+def _extract_param_index(name):
+    if name.endswith("]") and "[" in name:
+        try:
+            return int(name[name.rindex("[") + 1 : -1])
+        except ValueError:
+            return None
+    return None
+
+
+def _is_param_call(node):
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "param"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "param" and isinstance(func.value, ast.Name) and func.value.id in ("pytest", "oxtest")
+    return False
+
+
+def _literal_eval_node(node):
+    if isinstance(node, ast.Call) and _is_param_call(node):
+        values = [_literal_eval_node(arg) for arg in node.args]
+        return values[0] if len(values) == 1 else tuple(values)
+    if isinstance(node, ast.List):
+        return [_literal_eval_node(elt) for elt in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_literal_eval_node(elt) for elt in node.elts)
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
+
+
+def _extract_parametrize_info(decorator):
+    if not isinstance(decorator, ast.Call):
+        return None
+    func = decorator.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "parametrize"):
+        return None
+    args = decorator.args
+    if len(args) < 2:
+        return None
+    names_node = args[0]
+    values_node = args[1]
+    if not isinstance(names_node, ast.Constant) or not isinstance(names_node.value, str):
+        return None
+    names = [name.strip() for name in names_node.value.split(",") if name.strip()]
+    values = _literal_eval_node(values_node)
+    if not isinstance(values, (list, tuple)):
+        return None
+    return names, values
+
+
+def _get_parametrize_kwargs(path, test_name):
+    param_index = _extract_param_index(test_name)
+    if param_index is None:
+        return {}
+    base_name = _strip_param_id(test_name)
+    class_name = None
+    func_name = base_name
+    if "." in base_name:
+        class_name, func_name = base_name.split(".", 1)
+
+    path = pathlib.Path(path)
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    for node in tree.body:
+        if class_name is None and isinstance(node, ast.FunctionDef) and node.name == func_name:
+            for decorator in node.decorator_list:
+                info = _extract_parametrize_info(decorator)
+                if info is not None:
+                    names, values = info
+                    if param_index < 0 or param_index >= len(values):
+                        raise IndexError("Parameter index out of range")
+                    param_values = values[param_index]
+                    if len(names) == 1:
+                        return {names[0]: param_values}
+                    return {name: value for name, value in zip(names, param_values)}
+        elif class_name is not None and isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == func_name:
+                    for decorator in item.decorator_list:
+                        info = _extract_parametrize_info(decorator)
+                        if info is not None:
+                            names, values = info
+                            if param_index < 0 or param_index >= len(values):
+                                raise IndexError("Parameter index out of range")
+                            param_values = values[param_index]
+                            if len(names) == 1:
+                                return {names[0]: param_values}
+                            return {name: value for name, value in zip(names, param_values)}
+    return {}
+
+
 def _extract_terms(expr):
     return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr))
 
@@ -300,6 +414,425 @@ def _ensure_package_root(path):
         root = package_dir.parent
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
+
+
+def _ensure_oxtest_module():
+    if "oxtest" in sys.modules:
+        return
+    import types
+    import importlib
+    import warnings
+
+    class _SkipTest(Exception):
+        pass
+
+    class _XFailed(Exception):
+        pass
+
+    class _Approx:
+        def __init__(self, expected, rel=1e-6, abs=1e-12):
+            self.expected = expected
+            self.rel = rel
+            self.abs = abs
+
+        def __eq__(self, actual):
+            if self.expected is None:
+                return actual is None
+            if isinstance(self.expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+                if len(self.expected) != len(actual):
+                    return False
+                return all(_Approx(exp, self.rel, self.abs) == act for exp, act in zip(self.expected, actual))
+            try:
+                expected = float(self.expected)
+                actual = float(actual)
+            except Exception:
+                return self.expected == actual
+            diff = abs(expected - actual)
+            tolerance = self.abs + self.rel * abs(expected)
+            return diff <= tolerance
+
+        def __repr__(self):
+            return f"approx({self.expected!r})"
+
+    class _Mark:
+        def __getattr__(self, name):
+            def marker(*args, **kwargs):
+                if len(args) == 1 and callable(args[0]) and not kwargs:
+                    return args[0]
+                def _inner(fn):
+                    return fn
+                return _inner
+            return marker
+
+    class _Param(tuple):
+        def __new__(cls, args, **kwargs):
+            obj = tuple.__new__(cls, args)
+            obj._pytest_param = kwargs
+            return obj
+
+        def __repr__(self):
+            if self._pytest_param:
+                return f"oxtest.param({tuple(self)!r}, {self._pytest_param!r})"
+            return tuple.__repr__(self)
+
+    class _Raises:
+        def __init__(self, expected, *args, **kwargs):
+            self.expected = expected
+            self.exception = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                raise AssertionError(f"DID NOT RAISE {self.expected}")
+            if isinstance(exc_value, self.expected):
+                self.exception = exc_value
+                return True
+            return False
+
+    class _DeprecatedCall:
+        def __init__(self, func=None, *args, **kwargs):
+            self.func = func
+            self.args = args
+            self.kwargs = kwargs
+
+        def __call__(self, *args, **kwargs):
+            combined_args = args or self.args
+            combined_kwargs = kwargs or self.kwargs
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                result = self.func(*combined_args, **combined_kwargs)
+            return result
+
+        def __enter__(self):
+            warnings.simplefilter("always")
+            self._warning_manager = warnings.catch_warnings(record=True)
+            self._records = self._warning_manager.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._warning_manager.__exit__(exc_type, exc_value, traceback)
+            if exc_type is not None:
+                return False
+            if not any(issubclass(type(w.message), DeprecationWarning) for w in self._records):
+                raise AssertionError("Deprecated call did not emit DeprecationWarning")
+            return True
+
+    class _Warns:
+        def __init__(self, expected_warning, match=None):
+            self.expected_warning = expected_warning
+            self.match = match
+            self._records = None
+
+        def __enter__(self):
+            self._warning_manager = warnings.catch_warnings(record=True)
+            self._records = self._warning_manager.__enter__()
+            warnings.simplefilter("always")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._warning_manager.__exit__(exc_type, exc_value, traceback)
+            if exc_type is not None:
+                return False
+            for record in self._records:
+                if issubclass(record.message.__class__, self.expected_warning):
+                    if self.match is None or self.match in str(record.message):
+                        return True
+            raise AssertionError(f"Did not warn with {self.expected_warning}")
+
+    def fixture(func):
+        func.__oxtest_fixture__ = True
+        return func
+
+    def approx(expected, rel=1e-6, abs=1e-12):
+        return _Approx(expected, rel, abs)
+
+    def fail(msg="", pytrace=True):
+        raise AssertionError(msg)
+
+    def skip(msg=""):
+        raise _SkipTest(msg)
+
+    def importorskip(module_name, minversion=None, reason=None):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            raise _SkipTest(reason or f"skipped: {module_name} not available")
+
+    def xfail(reason=""):
+        raise _XFailed(reason)
+
+    def exit(msg=""):
+        raise SystemExit(msg)
+
+    def main(args=None):
+        return 0
+
+    def param(*args, **kwargs):
+        return _Param(args, **kwargs)
+
+    def raises(expected, *args, **kwargs):
+        if args or kwargs:
+            raise TypeError("oxtest.raises does not support direct call invocation in this shim")
+        return _Raises(expected)
+
+    def deprecated_call(func=None, *args, **kwargs):
+        if func is not None and callable(func):
+            return _DeprecatedCall(func, *args, **kwargs)()
+        return _DeprecatedCall(func, *args, **kwargs)
+
+    def register_assert_rewrite(*args, **kwargs):
+        return None
+
+    def warns(expected_warning, match=None):
+        return _Warns(expected_warning, match=match)
+
+    def freeze_includes(*args, **kwargs):
+        return None
+
+    module = types.ModuleType("oxtest")
+    module.fixture = fixture
+    module.mark = _Mark()
+    module.param = param
+    module.approx = approx
+    module.fail = fail
+    module.skip = skip
+    module.importorskip = importorskip
+    module.xfail = xfail
+    module.exit = exit
+    module.main = main
+    module.raises = raises
+    module.deprecated_call = deprecated_call
+    module.register_assert_rewrite = register_assert_rewrite
+    module.warns = warns
+    module.freeze_includes = freeze_includes
+    module.SkipTest = _SkipTest
+    module.XFailed = _XFailed
+    sys.modules["oxtest"] = module
+
+
+def _ensure_pytest_module():
+    if "pytest" in sys.modules:
+        return
+    import types
+    import importlib
+    import warnings
+
+    class _Approx:
+        def __init__(self, expected, rel=1e-6, abs=1e-12):
+            self.expected = expected
+            self.rel = rel
+            self.abs = abs
+
+        def __eq__(self, actual):
+            if self.expected is None:
+                return actual is None
+            if isinstance(self.expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+                if len(self.expected) != len(actual):
+                    return False
+                return all(_Approx(exp, self.rel, self.abs) == act for exp, act in zip(self.expected, actual))
+            try:
+                expected = float(self.expected)
+                actual = float(actual)
+            except Exception:
+                return self.expected == actual
+            diff = abs(expected - actual)
+            tolerance = self.abs + self.rel * abs(expected)
+            return diff <= tolerance
+
+        def __repr__(self):
+            return f"approx({self.expected!r})"
+
+    class _Param(tuple):
+        def __new__(cls, args, **kwargs):
+            obj = tuple.__new__(cls, args)
+            obj._pytest_param = kwargs
+            return obj
+
+        def __repr__(self):
+            if self._pytest_param:
+                return f"pytest.param({tuple(self)!r}, {self._pytest_param!r})"
+            return tuple.__repr__(self)
+
+    class _Raises:
+        def __init__(self, expected, *args, **kwargs):
+            self.expected = expected
+            self.exception = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                raise AssertionError(f"DID NOT RAISE {self.expected}")
+            if isinstance(exc_value, self.expected):
+                self.exception = exc_value
+                return True
+            return False
+
+    class _DeprecatedCall:
+        def __init__(self, func=None, *args, **kwargs):
+            self.func = func
+            self.args = args
+            self.kwargs = kwargs
+
+        def __call__(self, *args, **kwargs):
+            combined_args = args or self.args
+            combined_kwargs = kwargs or self.kwargs
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                result = self.func(*combined_args, **combined_kwargs)
+            return result
+
+        def __enter__(self):
+            warnings.simplefilter("always")
+            self._warning_manager = warnings.catch_warnings(record=True)
+            self._records = self._warning_manager.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._warning_manager.__exit__(exc_type, exc_value, traceback)
+            if exc_type is not None:
+                return False
+            if not any(issubclass(type(w.message), DeprecationWarning) for w in self._records):
+                raise AssertionError("Deprecated call did not emit DeprecationWarning")
+            return True
+
+    class _Warns:
+        def __init__(self, expected_warning, match=None):
+            self.expected_warning = expected_warning
+            self.match = match
+            self._records = None
+
+        def __enter__(self):
+            self._warning_manager = warnings.catch_warnings(record=True)
+            self._records = self._warning_manager.__enter__()
+            warnings.simplefilter("always")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            caught = self._warning_manager.__exit__(exc_type, exc_value, traceback)
+            if exc_type is not None:
+                return False
+            for record in self._records:
+                if issubclass(record.message.__class__, self.expected_warning):
+                    if self.match is None or self.match in str(record.message):
+                        return True
+            raise AssertionError(f"Did not warn with {self.expected_warning}")
+
+    class _Mark:
+        def __getattr__(self, name):
+            def marker(*args, **kwargs):
+                if len(args) == 1 and callable(args[0]) and not kwargs:
+                    return args[0]
+                def _inner(fn):
+                    return fn
+                return _inner
+            return marker
+
+    def approx(expected, rel=1e-6, abs=1e-12):
+        return _Approx(expected, rel, abs)
+
+    def fail(msg="", pytrace=True):
+        raise AssertionError(msg)
+
+    def skip(msg=""): 
+        raise _SkipTest(msg)
+
+    def importorskip(module_name, minversion=None, reason=None):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            raise _SkipTest(reason or f"skipped: {module_name} not available")
+
+    def xfail(reason=""):
+        raise _XFailed(reason)
+
+    def exit(msg=""):
+        raise SystemExit(msg)
+
+    def main(args=None):
+        return 0
+
+    def param(*args, **kwargs):
+        return _Param(args, **kwargs)
+
+    def raises(expected, *args, **kwargs):
+        if args or kwargs:
+            raise TypeError("pytest.raises does not support direct call invocation in this shim")
+        return _Raises(expected)
+
+    def deprecated_call(func=None, *args, **kwargs):
+        if func is not None and callable(func):
+            return _DeprecatedCall(func, *args, **kwargs)()
+        return _DeprecatedCall(func, *args, **kwargs)
+
+    def register_assert_rewrite(*args, **kwargs):
+        return None
+
+    def warns(expected_warning, match=None):
+        return _Warns(expected_warning, match=match)
+
+    def freeze_includes(*args, **kwargs):
+        return None
+
+    module = types.ModuleType("pytest")
+    module.approx = approx
+    module.fail = fail
+    module.skip = skip
+    module.importorskip = importorskip
+    module.xfail = xfail
+    module.exit = exit
+    module.main = main
+    module.param = param
+    module.raises = raises
+    module.deprecated_call = deprecated_call
+    module.register_assert_rewrite = register_assert_rewrite
+    module.warns = warns
+    module.freeze_includes = freeze_includes
+    module.SkipTest = _SkipTest
+    module.XFailed = _XFailed
+    module.mark = _Mark()
+    sys.modules["pytest"] = module
+
+
+def _resolve_fixture(module, fixture_name, fixture_names, cache, stack):
+    if fixture_name in cache:
+        return cache[fixture_name]
+    if fixture_name in stack:
+        raise RuntimeError(f"Circular fixture dependency: {' -> '.join(stack + [fixture_name])}")
+    fixture = getattr(module, fixture_name, None)
+    if fixture is None or not callable(fixture):
+        raise KeyError(f"Fixture {fixture_name} not found")
+    stack.append(fixture_name)
+    try:
+        sig = inspect.signature(fixture)
+        kwargs = {}
+        for param in sig.parameters.values():
+            if param.name == "self":
+                continue
+            if param.name in fixture_names:
+                kwargs[param.name] = _resolve_fixture(module, param.name, fixture_names, cache, stack)
+        value = fixture(**kwargs)
+        cache[fixture_name] = value
+        return value
+    finally:
+        stack.pop()
+
+
+def _call_test_with_fixtures(func, module, path, test_name):
+    fixture_names = set(list_fixtures(path))
+    parametrize_kwargs = _get_parametrize_kwargs(path, test_name)
+    sig = inspect.signature(func)
+    kwargs = {}
+    for param in sig.parameters.values():
+        if param.name == "self":
+            continue
+        if param.name in fixture_names:
+            kwargs[param.name] = _resolve_fixture(module, param.name, fixture_names, {}, [])
+    kwargs.update(parametrize_kwargs)
+    func(**kwargs)
 
 
 def match_keyword(expr, test_name, extra_names):
@@ -349,8 +882,12 @@ def run_test(path, test_name):
             _apply_fixture(setup_class, cls)
             _apply_fixture(setup_method, instance, base_method_name)
             func = getattr(instance, base_method_name)
-            func()
+            _call_test_with_fixtures(func, module, path, test_name)
             return True, ""
+        except _SkipTest as err:
+            return True, f"skipped: {err}"
+        except _XFailed as err:
+            return True, f"xfail: {err}"
         except Exception:
             return False, traceback.format_exc()
         finally:
@@ -365,8 +902,12 @@ def run_test(path, test_name):
             _apply_fixture(setup_module, module)
             _apply_fixture(setup_function, base_test_name)
             func = getattr(module, base_test_name)
-            func()
+            _call_test_with_fixtures(func, module, path, test_name)
             return True, ""
+        except _SkipTest as err:
+            return True, f"skipped: {err}"
+        except _XFailed as err:
+            return True, f"xfail: {err}"
         except Exception:
             return False, traceback.format_exc()
         finally:

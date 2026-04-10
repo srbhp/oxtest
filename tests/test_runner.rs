@@ -144,3 +144,153 @@ def test_with_fixture(my_fixture):
     assert_eq!(usage[0].test, "test_with_fixture".to_string());
     assert_eq!(usage[0].fixtures, vec!["my_fixture".to_string()]);
 }
+
+#[test]
+fn run_tests_executes_oxtest_fixture_dependent_test() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_oxtest_fixture.py");
+    fs::write(
+        &path,
+        r#"
+import oxtest
+
+@oxtest.fixture
+def my_fixture():
+    return 42
+
+@oxtest.fixture
+def my_other_fixture(my_fixture):
+    return my_fixture * 2
+
+
+def test_with_oxtest_fixtures(my_fixture, my_other_fixture):
+    assert my_fixture == 42
+    assert my_other_fixture == 84
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+
+    assert_eq!(summary.passed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.results.len(), 1);
+    assert_eq!(summary.results[0].full_name, "test_with_oxtest_fixtures");
+}
+
+#[test]
+fn run_tests_supports_oxtest_mark_parametrize() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_oxtest_mark.py");
+    fs::write(
+        &path,
+        r#"
+import oxtest
+
+@oxtest.mark.parametrize(
+    "value, expected",
+    [
+        oxtest.param(1, 1, id="one"),
+        oxtest.param(2, 2, id="two"),
+    ],
+)
+def test_param_example(value, expected):
+    assert value == expected
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+
+    assert_eq!(summary.passed, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.results.len(), 2);
+    assert!(summary
+        .results
+        .iter()
+        .any(|item| item.full_name.starts_with("test_param_example")));
+}
+
+#[test]
+fn run_tests_supports_pytest_shim_helpers() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_pytest_shim.py");
+    fs::write(
+        &path,
+        r#"
+import warnings
+import pytest
+
+
+def test_approx():
+    assert 0.1 + 0.2 == pytest.approx(0.3)
+
+
+def test_raises():
+    with pytest.raises(ValueError):
+        raise ValueError("boom")
+
+
+def test_warns():
+    with pytest.warns(DeprecationWarning):
+        warnings.warn("deprecated", DeprecationWarning)
+
+
+def test_importorskip():
+    assert pytest.importorskip("sys") is not None
+
+
+def test_main():
+    assert pytest.main() == 0
+
+
+def test_param():
+    p = pytest.param(1, id="one")
+    assert p[0] == 1
+
+
+def test_xfail():
+    pytest.xfail("expected failure")
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+
+    assert_eq!(summary.passed, 7);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.results.len(), 7);
+    let xfail_result = summary
+        .results
+        .iter()
+        .find(|item| item.full_name == "test_xfail")
+        .unwrap();
+    assert!(xfail_result.output.contains("xfail"));
+}
+
+#[test]
+fn run_tests_reports_pytest_fail() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_pytest_fail.py");
+    fs::write(
+        &path,
+        r#"
+import pytest
+
+def test_mark_fail():
+    pytest.fail("boom")
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+
+    assert_eq!(summary.passed, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.results.len(), 1);
+    assert!(summary.results[0].output.contains("boom"));
+}
