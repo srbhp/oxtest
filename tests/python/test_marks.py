@@ -1,33 +1,34 @@
-import oxtest
 import warnings
 
+import oxtest
 
-# pytest.mark.filterwarnings
+
+# oxtest.mark.filterwarnings
 @oxtest.mark.filterwarnings("ignore:api v1 is deprecated")
 def test_filter_warnings():
     warnings.warn("api v1 is deprecated", DeprecationWarning)
     assert True
 
 
-# pytest.mark.parametrize
+# oxtest.mark.parametrize
 @oxtest.mark.parametrize("test_input,expected", [("3+5", 8), ("2+4", 6), ("6*9", 54)])
 def test_eval(test_input, expected):
     assert eval(test_input) == expected
 
 
-# pytest.mark.skip
+# oxtest.mark.skip
 @oxtest.mark.skip(reason="no way of currently testing this")
 def test_the_unknown():
     pass
 
 
-# pytest.mark.skipif
+# oxtest.mark.skipif
 @oxtest.mark.skipif(1 > 0, reason="skipping because 1 is greater than 0")
 def test_conditional_skip():
     pass
 
 
-# pytest.mark.usefixtures
+# oxtest.mark.usefixtures
 @oxtest.fixture
 def cleandir():
     # setup code
@@ -41,7 +42,7 @@ class TestDirectoryStuff:
         assert True
 
 
-# pytest.mark.xfail
+# oxtest.mark.xfail
 @oxtest.mark.xfail(reason="known bug")
 def test_expected_failure():
     assert 0 == 1

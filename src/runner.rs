@@ -107,6 +107,7 @@ import sys
 import traceback
 import re
 import inspect
+import warnings
 
 
 class _SkipTest(Exception):
@@ -158,17 +159,47 @@ def _is_fixture_decorator(decorator):
 def _extract_mark_name(decorator):
     if isinstance(decorator, ast.Call):
         return _extract_mark_name(decorator.func)
-    if not isinstance(decorator, ast.Attribute):
-        return None
-    attr = decorator.attr
-    value = decorator.value
-    if isinstance(value, ast.Attribute) and value.attr == "mark":
-        return attr
-    if isinstance(value, ast.Name) and value.id == "mark":
-        return attr
-    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "pytest" and value.attr == "mark":
-        return attr
+    if isinstance(decorator, ast.Attribute):
+        attr = decorator.attr
+        value = decorator.value
+        if isinstance(value, ast.Name) and value.id == "mark":
+            return attr
+        if isinstance(value, ast.Attribute) and value.attr == "mark" and isinstance(value.value, ast.Name) and value.value.id in ("pytest", "oxtest"):
+            return attr
     return None
+
+
+def _safe_literal_eval(node):
+    if isinstance(node, ast.Name):
+        if node.id == "True":
+            return True
+        if node.id == "False":
+            return False
+        if node.id == "None":
+            return None
+        return getattr(__builtins__, node.id, None)
+    if isinstance(node, ast.Attribute):
+        value = _safe_literal_eval(node.value)
+        if value is None:
+            return None
+        return getattr(value, node.attr, None)
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
+
+
+def _extract_mark_info(decorator):
+    name = _extract_mark_name(decorator)
+    if not name:
+        return None
+    if isinstance(decorator, ast.Call):
+        args = [_safe_literal_eval(arg) for arg in decorator.args]
+        kwargs = {kw.arg: _safe_literal_eval(kw.value) for kw in decorator.keywords if kw.arg is not None}
+    else:
+        args = []
+        kwargs = {}
+    return {"name": name, "args": args, "kwargs": kwargs}
 
 
 def _collect_marks(decorators):
@@ -395,6 +426,35 @@ def _get_parametrize_kwargs(path, test_name):
                                 return {names[0]: param_values}
                             return {name: value for name, value in zip(names, param_values)}
     return {}
+
+
+def _get_test_marks(path, test_name):
+    base_name = _strip_param_id(test_name)
+    class_name = None
+    func_name = base_name
+    if "." in base_name:
+        class_name, func_name = base_name.split(".", 1)
+
+    path = pathlib.Path(path)
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    marks = []
+    for node in tree.body:
+        if class_name is None and isinstance(node, ast.FunctionDef) and node.name == func_name:
+            for decorator in node.decorator_list:
+                info = _extract_mark_info(decorator)
+                if info is not None:
+                    marks.append(info)
+            return marks
+        elif class_name is not None and isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == func_name:
+                    for decorator in item.decorator_list:
+                        info = _extract_mark_info(decorator)
+                        if info is not None:
+                            marks.append(info)
+                    return marks
+    return marks
 
 
 def _extract_terms(expr):
@@ -823,6 +883,33 @@ def _resolve_fixture(module, fixture_name, fixture_names, cache, stack):
 
 def _call_test_with_fixtures(func, module, path, test_name):
     fixture_names = set(list_fixtures(path))
+    marks = _get_test_marks(path, test_name)
+    usefixtures = []
+    filterwarnings = []
+    skip_reason = None
+    xfail_reason = None
+
+    for mark in marks:
+        if mark["name"] == "skip":
+            skip_reason = mark["args"][0] if mark["args"] else mark["kwargs"].get("reason", "")
+        elif mark["name"] == "skipif":
+            condition = mark["args"][0] if mark["args"] else mark["kwargs"].get("condition", False)
+            if condition:
+                skip_reason = mark["kwargs"].get("reason", "")
+        elif mark["name"] == "usefixtures":
+            for arg in mark["args"]:
+                if isinstance(arg, (list, tuple)):
+                    usefixtures.extend(arg)
+                elif isinstance(arg, str):
+                    usefixtures.append(arg)
+        elif mark["name"] == "xfail":
+            xfail_reason = mark["kwargs"].get("reason", mark["args"][0] if mark["args"] else "")
+        elif mark["name"] == "filterwarnings":
+            filterwarnings.append((mark["args"], mark["kwargs"]))
+
+    if skip_reason is not None:
+        raise _SkipTest(skip_reason)
+
     parametrize_kwargs = _get_parametrize_kwargs(path, test_name)
     sig = inspect.signature(func)
     kwargs = {}
@@ -831,8 +918,39 @@ def _call_test_with_fixtures(func, module, path, test_name):
             continue
         if param.name in fixture_names:
             kwargs[param.name] = _resolve_fixture(module, param.name, fixture_names, {}, [])
+
+    for fixture in usefixtures:
+        if fixture not in kwargs:
+            _resolve_fixture(module, fixture, fixture_names, {}, [])
+
     kwargs.update(parametrize_kwargs)
-    func(**kwargs)
+
+    def invoke():
+        return func(**kwargs)
+
+    if filterwarnings:
+        with warnings.catch_warnings():
+            for args, kw in filterwarnings:
+                warnings.filterwarnings(*args, **kw)
+            try:
+                result = invoke()
+            except Exception as err:
+                if xfail_reason is not None:
+                    raise _XFailed(xfail_reason or str(err))
+                raise
+            if xfail_reason is not None:
+                raise _XFailed(xfail_reason or "expected xfail")
+            return result
+    else:
+        try:
+            result = invoke()
+        except Exception as err:
+            if xfail_reason is not None:
+                raise _XFailed(xfail_reason or str(err))
+            raise
+        if xfail_reason is not None:
+            raise _XFailed(xfail_reason or "expected xfail")
+        return result
 
 
 def match_keyword(expr, test_name, extra_names):

@@ -89,3 +89,33 @@ def test_register_assert_rewrite_and_freeze_includes_example():
 def test_warns_example():
     with oxtest.warns(DeprecationWarning):
         warnings.warn("deprecated", DeprecationWarning)
+
+
+@oxtest.fixture
+def my_fruit_fixture():
+    return "apple"
+
+
+@oxtest.mark.usefixtures("my_fruit_fixture")
+def test_usefixtures_example():
+    assert True
+
+
+@oxtest.mark.skip(reason="skip example")
+def test_skip_example_mark():
+    assert False
+
+
+@oxtest.mark.skipif(True, reason="skipif example")
+def test_skipif_example_mark():
+    assert False
+
+
+@oxtest.mark.xfail(reason="expected failure example")
+def test_xfail_example_mark():
+    raise AssertionError("boom")
+
+
+@oxtest.mark.custom
+def test_custom_mark_example():
+    assert True

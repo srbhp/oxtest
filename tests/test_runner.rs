@@ -214,6 +214,55 @@ def test_param_example(value, expected):
 }
 
 #[test]
+fn run_tests_supports_oxtest_mark_behavior() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_oxtest_mark_behavior.py");
+    fs::write(
+        &path,
+        r#"
+import oxtest
+
+@oxtest.fixture
+def my_fixture():
+    return 42
+
+@oxtest.mark.usefixtures("my_fixture")
+def test_usefixtures():
+    assert True
+
+@oxtest.mark.skip(reason="skip example")
+def test_skip():
+    assert False
+
+@oxtest.mark.skipif(True, reason="skipif example")
+def test_skipif():
+    assert False
+
+@oxtest.mark.xfail(reason="expected failure")
+def test_xfail():
+    raise AssertionError("boom")
+
+@oxtest.mark.custom
+def test_custom_mark():
+    assert True
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+
+    assert_eq!(summary.passed, 5);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.results.len(), 5);
+    assert!(summary.results.iter().any(|item| item.full_name == "test_usefixtures"));
+    assert!(summary.results.iter().any(|item| item.full_name == "test_skip"));
+    assert!(summary.results.iter().any(|item| item.full_name == "test_skipif"));
+    assert!(summary.results.iter().any(|item| item.full_name == "test_xfail"));
+    assert!(summary.results.iter().any(|item| item.full_name == "test_custom_mark"));
+}
+
+#[test]
 fn run_tests_supports_pytest_shim_helpers() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test_pytest_shim.py");

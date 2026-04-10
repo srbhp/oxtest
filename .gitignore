@@ -23,3 +23,4 @@ venv/
 # Misc
 .DS_Store
 *.log
+*tmp*
