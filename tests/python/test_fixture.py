@@ -63,3 +63,57 @@ def test_oxtester_example(oxtester):
 
 def test_record_property_example(record_property):
     record_property("key", "value")
+    assert record_property.get("key") == "value"
+
+
+def test_record_testsuite_property_example(record_testsuite_property):
+    record_testsuite_property("suite_key", "suite_value")
+
+
+def test_recwarn_example(recwarn):
+    import warnings
+
+    warnings.warn("hello", UserWarning)
+    assert len(recwarn) == 1
+    w = recwarn.pop(UserWarning)
+    assert str(w.message) == "hello"
+
+
+def test_request_example(request):
+    assert request.node.name == "test_request_example"
+
+
+def test_subtests_example(subtests):
+    for i in range(3):
+        with subtests.test(msg="iteration", i=i):
+            assert i < 3
+
+
+def test_testdir_example(testdir):
+    testdir.makepyfile("def test_pass(): pass")
+    result = testdir.runoxtest()
+    result.assert_outcomes(passed=1)
+
+
+def test_tmp_path_example(tmp_path):
+    d = tmp_path / "sub"
+    d.mkdir()
+    f = d / "hello.txt"
+    f.write_text("content")
+    assert f.read_text() == "content"
+
+
+def test_tmp_path_factory_example(tmp_path_factory):
+    path = tmp_path_factory.mktemp("data")
+    assert path.is_dir()
+
+
+def test_tmpdir_example(tmpdir):
+    f = tmpdir.mkdir("sub").join("hello.txt")
+    f.write("content")
+    assert f.read() == "content"
+
+
+def test_tmpdir_factory_example(tmpdir_factory):
+    path = tmpdir_factory.mktemp("data")
+    assert path.is_dir()

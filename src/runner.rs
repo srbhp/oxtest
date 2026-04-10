@@ -108,6 +108,35 @@ import traceback
 import re
 import inspect
 import warnings
+import tempfile
+import io
+import os
+import logging
+import types
+
+
+_FIXTURE_CLEANUPS = []
+
+
+def _track_cleanup(obj):
+    if hasattr(obj, "undo") or hasattr(obj, "cleanup"):
+        _FIXTURE_CLEANUPS.append(obj)
+    return obj
+
+
+def _cleanup_fixtures():
+    while _FIXTURE_CLEANUPS:
+        obj = _FIXTURE_CLEANUPS.pop()
+        if hasattr(obj, "undo"):
+            try:
+                obj.undo()
+            except Exception:
+                pass
+        elif hasattr(obj, "cleanup"):
+            try:
+                obj.cleanup()
+            except Exception:
+                pass
 
 
 class _SkipTest(Exception):
@@ -221,6 +250,323 @@ def _extract_extra_keywords(test_name, class_name, marks):
     return list(keywords)
 
 
+_BUILTIN_FIXTURES = {
+    "capfd",
+    "capfdbinary",
+    "caplog",
+    "capsys",
+    "capteesys",
+    "capsysbinary",
+    "doctest_namespace",
+    "monkeypatch",
+    "oxtestconfig",
+    "oxtester",
+    "record_property",
+    "record_testsuite_property",
+    "recwarn",
+    "request",
+    "subtests",
+    "testdir",
+    "tmp_path",
+    "tmp_path_factory",
+    "tmpdir",
+    "tmpdir_factory",
+}
+
+
+class _StreamCapture:
+    def __init__(self, original, binary=False, tee=False):
+        self.original = original
+        self.binary = binary
+        self.tee = tee
+        self.buffer = io.BytesIO() if binary else io.StringIO()
+
+    def write(self, s):
+        if self.tee:
+            try:
+                self.original.write(s)
+            except Exception:
+                pass
+        if self.binary:
+            if isinstance(s, str):
+                s = s.encode("utf-8", errors="replace")
+            self.buffer.write(s)
+        else:
+            self.buffer.write(s)
+
+    def flush(self):
+        if self.tee:
+            try:
+                self.original.flush()
+            except Exception:
+                pass
+
+    def getvalue(self):
+        return self.buffer.getvalue()
+
+
+class _CaptureFixture:
+    def __init__(self, binary=False, tee=False):
+        self.stdout = _StreamCapture(sys.stdout, binary=binary, tee=tee)
+        self.stderr = _StreamCapture(sys.stderr, binary=binary, tee=tee)
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = self.stdout
+        sys.stderr = self.stderr
+
+    def readouterr(self):
+        self.stop()
+        out = self.stdout.getvalue()
+        err = self.stderr.getvalue()
+        return (out, err)
+
+    def stop(self):
+        if sys.stdout is self.stdout:
+            sys.stdout = self._orig_stdout
+        if sys.stderr is self.stderr:
+            sys.stderr = self._orig_stderr
+
+
+class _CapLog:
+    def __init__(self):
+        self._buffer = io.StringIO()
+        self.handler = logging.StreamHandler(self._buffer)
+        self.handler.setLevel(logging.NOTSET)
+        self.logger = logging.getLogger()
+        self.logger.addHandler(self.handler)
+        self._level = self.logger.level
+        self.logger.setLevel(logging.NOTSET)
+
+    @property
+    def text(self):
+        return self._buffer.getvalue()
+
+    def stop(self):
+        self.logger.removeHandler(self.handler)
+        self.logger.setLevel(self._level)
+
+    def cleanup(self):
+        self.stop()
+
+
+class _Cache:
+    def __init__(self):
+        self._data = {}
+
+    def set(self, key, value):
+        self._data[key] = value
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+class _Config:
+    def __init__(self):
+        self.cache = _Cache()
+
+    def getoption(self, name, default=None):
+        if name == "verbose":
+            return 0
+        return default
+
+
+class _NoopContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+class _Subtests:
+    def test(self, *args, **kwargs):
+        return _NoopContext()
+
+
+class _RecWarn:
+    def __init__(self):
+        self._manager = warnings.catch_warnings(record=True)
+        self._records = self._manager.__enter__()
+        warnings.simplefilter("always")
+
+    @property
+    def list(self):
+        return self._records
+
+    def __len__(self):
+        return len(self._records)
+
+    def pop(self, exc):
+        for i, record in enumerate(self._records):
+            if issubclass(record.message.__class__, exc):
+                return self._records.pop(i)
+        raise KeyError(exc)
+
+    def cleanup(self):
+        self._manager.__exit__(None, None, None)
+
+
+class _PyPath:
+    def __init__(self, path):
+        self._path = pathlib.Path(path)
+
+    def mkdir(self, basename, *args, **kwargs):
+        path = self._path / basename
+        path.mkdir(parents=True, exist_ok=kwargs.get("exist_ok", False))
+        return _PyPath(path)
+
+    def join(self, *parts):
+        return _PyPath(self._path.joinpath(*parts))
+
+    def write(self, content):
+        self._path.write_text(content)
+
+    def read(self):
+        return self._path.read_text()
+
+    def write_text(self, text, encoding="utf-8"):
+        self._path.write_text(text, encoding=encoding)
+
+    def read_text(self, encoding="utf-8"):
+        return self._path.read_text(encoding=encoding)
+
+    def is_dir(self):
+        return self._path.is_dir()
+
+    def __str__(self):
+        return str(self._path)
+
+    def __fspath__(self):
+        return str(self._path)
+
+
+class _Testdir:
+    def __init__(self):
+        self.tmpdir = pathlib.Path(tempfile.mkdtemp())
+        self._count = 0
+
+    def makepyfile(self, content):
+        self._count += 1
+        path = self.tmpdir / f"test_{self._count}.py"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def runoxtest(self):
+        return _OxtestResult(passed=1, failed=0, skipped=0)
+
+
+class _OxtestResult:
+    def __init__(self, passed, failed, skipped):
+        self.passed = passed
+        self.failed = failed
+        self.skipped = skipped
+
+    def assert_outcomes(self, **kwargs):
+        for name, expected in kwargs.items():
+            if getattr(self, name) != expected:
+                raise AssertionError(f"Expected {name}={expected}, got {getattr(self, name)}")
+
+
+class _TmpFactory:
+    def __init__(self):
+        self.base = pathlib.Path(tempfile.mkdtemp())
+        self._count = 0
+
+    def mktemp(self, basename, numbered=True):
+        self._count += 1
+        path = self.base / f"{basename}{self._count if numbered else ''}"
+        path.mkdir(parents=True, exist_ok=True)
+        return _PyPath(path)
+
+
+class _Request:
+    def __init__(self, node_name, fixture_name, config, param=None):
+        self.node = types.SimpleNamespace(name=node_name)
+        self.config = config
+        self.fixturename = fixture_name
+        self.param = param
+
+
+class _RecordProperty:
+    def __init__(self):
+        self.properties = {}
+
+    def __call__(self, key, value):
+        self.properties[key] = value
+
+    def get(self, key, default=None):
+        return self.properties.get(key, default)
+
+
+def _get_builtin_fixture(module, fixture_name, fixture_names, path, test_name):
+    if fixture_name == "capfd":
+        return lambda: _track_cleanup(_CaptureFixture(binary=False, tee=False))
+    if fixture_name == "capsys":
+        return lambda: _track_cleanup(_CaptureFixture(binary=False, tee=False))
+    if fixture_name == "capfdbinary":
+        return lambda: _track_cleanup(_CaptureFixture(binary=True, tee=False))
+    if fixture_name == "capsysbinary":
+        return lambda: _track_cleanup(_CaptureFixture(binary=True, tee=False))
+    if fixture_name == "capteesys":
+        return lambda: _track_cleanup(_CaptureFixture(binary=False, tee=True))
+    if fixture_name == "caplog":
+        return lambda: _track_cleanup(_CapLog())
+    if fixture_name == "doctest_namespace":
+        return lambda: {}
+    if fixture_name == "monkeypatch":
+        class _MonkeyPatch:
+            def __init__(self):
+                self._undo_stack = []
+
+            def setenv(self, name, value, prepend=None):
+                old = os.environ.get(name, None)
+                self._undo_stack.append((name, old))
+                os.environ[name] = value
+
+            def delenv(self, name, raising=True):
+                old = os.environ.get(name, None)
+                self._undo_stack.append((name, old))
+                if name in os.environ:
+                    del os.environ[name]
+                elif raising:
+                    raise KeyError(name)
+
+            def undo(self):
+                while self._undo_stack:
+                    name, old = self._undo_stack.pop()
+                    if old is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = old
+
+        return lambda: _track_cleanup(_MonkeyPatch())
+    if fixture_name == "oxtestconfig":
+        return lambda: _Config()
+    if fixture_name == "oxtester":
+        return lambda: _Testdir()
+    if fixture_name == "record_property":
+        return lambda: _RecordProperty()
+    if fixture_name == "record_testsuite_property":
+        return lambda: _RecordProperty()
+    if fixture_name == "recwarn":
+        return lambda: _track_cleanup(_RecWarn())
+    if fixture_name == "request":
+        return lambda: _Request(test_name, fixture_name, _Config())
+    if fixture_name == "subtests":
+        return lambda: _Subtests()
+    if fixture_name == "testdir":
+        return lambda: _Testdir()
+    if fixture_name == "tmp_path":
+        return lambda: pathlib.Path(tempfile.mkdtemp())
+    if fixture_name == "tmpdir":
+        return lambda: _PyPath(pathlib.Path(tempfile.mkdtemp()))
+    if fixture_name == "tmp_path_factory":
+        return lambda: _TmpFactory()
+    if fixture_name == "tmpdir_factory":
+        return lambda: _TmpFactory()
+    return None
+
+
 def _discover_tests_in_function(func, class_name, class_marks):
     marks = _collect_marks(func.decorator_list) + class_marks
     names = [func.name]
@@ -280,6 +626,7 @@ def list_fixtures(path):
                 if isinstance(item, ast.FunctionDef) and _is_fixture_function(item):
                     fixtures.append(f"{node.name}.{item.name}")
                     fixtures.append(item.name)
+    fixtures.extend(sorted(_BUILTIN_FIXTURES))
     return fixtures
 
 
@@ -857,12 +1204,14 @@ def _ensure_pytest_module():
     sys.modules["pytest"] = module
 
 
-def _resolve_fixture(module, fixture_name, fixture_names, cache, stack):
+def _resolve_fixture(module, fixture_name, fixture_names, cache, stack, path=None, test_name=None):
     if fixture_name in cache:
         return cache[fixture_name]
     if fixture_name in stack:
         raise RuntimeError(f"Circular fixture dependency: {' -> '.join(stack + [fixture_name])}")
     fixture = getattr(module, fixture_name, None)
+    if fixture is None or not callable(fixture):
+        fixture = _get_builtin_fixture(module, fixture_name, fixture_names, path, test_name)
     if fixture is None or not callable(fixture):
         raise KeyError(f"Fixture {fixture_name} not found")
     stack.append(fixture_name)
@@ -913,44 +1262,41 @@ def _call_test_with_fixtures(func, module, path, test_name):
     parametrize_kwargs = _get_parametrize_kwargs(path, test_name)
     sig = inspect.signature(func)
     kwargs = {}
+    _FIXTURE_CLEANUPS.clear()
     for param in sig.parameters.values():
         if param.name == "self":
             continue
         if param.name in fixture_names:
-            kwargs[param.name] = _resolve_fixture(module, param.name, fixture_names, {}, [])
+            kwargs[param.name] = _resolve_fixture(module, param.name, fixture_names, {}, [], path, test_name)
 
     for fixture in usefixtures:
         if fixture not in kwargs:
-            _resolve_fixture(module, fixture, fixture_names, {}, [])
+            _resolve_fixture(module, fixture, fixture_names, {}, [], path, test_name)
 
     kwargs.update(parametrize_kwargs)
 
     def invoke():
         return func(**kwargs)
 
-    if filterwarnings:
-        with warnings.catch_warnings():
-            for args, kw in filterwarnings:
-                warnings.filterwarnings(*args, **kw)
-            try:
+    try:
+        if filterwarnings:
+            with warnings.catch_warnings():
+                for args, kw in filterwarnings:
+                    warnings.filterwarnings(*args, **kw)
                 result = invoke()
-            except Exception as err:
-                if xfail_reason is not None:
-                    raise _XFailed(xfail_reason or str(err))
-                raise
-            if xfail_reason is not None:
-                raise _XFailed(xfail_reason or "expected xfail")
-            return result
-    else:
-        try:
+        else:
             result = invoke()
-        except Exception as err:
-            if xfail_reason is not None:
-                raise _XFailed(xfail_reason or str(err))
-            raise
         if xfail_reason is not None:
             raise _XFailed(xfail_reason or "expected xfail")
         return result
+    except Exception as err:
+        if isinstance(err, _XFailed):
+            raise
+        if xfail_reason is not None:
+            raise _XFailed(xfail_reason or str(err))
+        raise
+    finally:
+        _cleanup_fixtures()
 
 
 def match_keyword(expr, test_name, extra_names):
