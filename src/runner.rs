@@ -255,6 +255,7 @@ def fixtures_per_test(path):
 
 def load_module(path):
     path = pathlib.Path(path)
+    _ensure_package_root(path)
     module_name = f"oxtest_module_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
@@ -284,6 +285,21 @@ def _strip_param_id(name):
 
 def _extract_terms(expr):
     return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr))
+
+
+def _ensure_package_root(path):
+    path = pathlib.Path(path).resolve()
+    package_dir = None
+    current = path.parent
+    while current != current.parent:
+        if (current / "__init__.py").exists():
+            package_dir = current
+        current = current.parent
+
+    if package_dir is not None:
+        root = package_dir.parent
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
 
 
 def match_keyword(expr, test_name, extra_names):
