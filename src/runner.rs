@@ -2,8 +2,10 @@ use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -653,7 +655,9 @@ def load_module(path):
     _ensure_package_root(path)
     _ensure_oxtest_module()
     _ensure_pytest_module()
-    module_name = f"oxtest_module_{path.stem}"
+    module_name = f"oxtest_module_{re.sub(r'[^0-9a-zA-Z]+', '_', str(path))}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -998,8 +1002,40 @@ def _ensure_oxtest_module():
     def freeze_includes(*args, **kwargs):
         return None
 
+    _HOOK_SPECS = {}
+    _HOOK_IMPLS = {}
+
+    def _sort_hook_impls(name):
+        _HOOK_IMPLS[name].sort(key=lambda item: (not item[1], item[2]))
+
+    def hookspec(func):
+        _HOOK_SPECS[func.__name__] = func
+        return func
+
+    def hookimpl(func=None, *, specname=None, tryfirst=False, trylast=False):
+        def decorator(fn):
+            name = specname or fn.__name__
+            if name not in _HOOK_IMPLS:
+                _HOOK_IMPLS[name] = []
+            if not any(item[0] is fn for item in _HOOK_IMPLS[name]):
+                _HOOK_IMPLS[name].append((fn, tryfirst, trylast))
+                _sort_hook_impls(name)
+            return fn
+        if func is None:
+            return decorator
+        return decorator(func)
+
+    def _call_hook(name, *args, **kwargs):
+        results = []
+        for impl, _, _ in _HOOK_IMPLS.get(name, []):
+            results.append(impl(*args, **kwargs))
+        return results
+
     module = types.ModuleType("oxtest")
     module.fixture = fixture
+    module.hookspec = hookspec
+    module.hookimpl = hookimpl
+    module._call_hook = _call_hook
     module.mark = _Mark()
     module.param = param
     module.approx = approx
@@ -1539,6 +1575,119 @@ fn discover_file(path: &Path) -> Result<Option<Vec<TestItem>>> {
     })
 }
 
+fn call_py_hook(py: Python<'_>, name: &str, args: &[PyObject]) -> Result<()> {
+    let module = PyModule::import(py, "oxtest")?;
+    let call_hook = module.getattr("_call_hook")?;
+    let arguments: Vec<PyObject> = std::iter::once(name.to_object(py))
+        .chain(args.iter().cloned())
+        .collect();
+    call_hook.call(PyTuple::new(py, arguments), None)?;
+    Ok(())
+}
+
+fn test_item_to_py<'py>(py: Python<'py>, test: &TestItem) -> PyObject {
+    let dict = PyDict::new(py);
+    dict.set_item("file", test.file.to_string_lossy().to_string()).unwrap();
+    dict.set_item("name", test.name.clone()).unwrap();
+    dict.set_item("full_name", test.full_name.clone()).unwrap();
+    dict.set_item("marks", test.marks.clone()).unwrap();
+    dict.set_item("extra_keywords", test.extra_keywords.clone()).unwrap();
+    dict.into()
+}
+
+fn test_result_to_py<'py>(py: Python<'py>, result: &TestResult) -> PyObject {
+    let dict = PyDict::new(py);
+    dict.set_item("file", result.file.to_string_lossy().to_string()).unwrap();
+    dict.set_item("full_name", result.full_name.clone()).unwrap();
+    dict.set_item("passed", result.passed).unwrap();
+    dict.set_item("output", result.output.clone()).unwrap();
+    dict.set_item("marks", result.marks.clone()).unwrap();
+    dict.into()
+}
+
+fn config_to_py<'py>(py: Python<'py>, config: &RunConfig) -> PyObject {
+    let dict = PyDict::new(py);
+    dict.set_item("k_expr", config.k_expr.clone()).unwrap();
+    dict.set_item("m_expr", config.m_expr.clone()).unwrap();
+    dict.set_item("exitfirst", config.exitfirst).unwrap();
+    dict.set_item("maxfail", config.maxfail).unwrap();
+    dict.set_item("jobs", config.jobs).unwrap();
+    dict.set_item(
+        "ignore",
+        config
+            .ignore
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    dict.set_item("ignore_glob", config.ignore_glob.clone()).unwrap();
+    dict.set_item("capture", format!("{:?}", config.capture)).unwrap();
+    dict.set_item("collect_only", config.collect_only).unwrap();
+    dict.set_item("quiet", config.quiet).unwrap();
+    dict.set_item("verbose", config.verbose).unwrap();
+    dict.set_item("strict", config.strict).unwrap();
+    dict.set_item("strict_markers", config.strict_markers).unwrap();
+    dict.set_item("strict_config", config.strict_config).unwrap();
+    dict.into()
+}
+
+fn summary_to_py<'py>(py: Python<'py>, summary: &TestSummary) -> PyObject {
+    let dict = PyDict::new(py);
+    let results = PyList::empty(py);
+    for result in &summary.results {
+        results.append(test_result_to_py(py, result)).unwrap();
+    }
+    dict.set_item("results", results).unwrap();
+    dict.set_item("passed", summary.passed).unwrap();
+    dict.set_item("failed", summary.failed).unwrap();
+    dict.into()
+}
+
+fn import_test_modules(tests: &[TestItem]) -> Result<()> {
+    let mut imported_paths = HashSet::new();
+    Python::with_gil(|py| {
+        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let load_module = helper.getattr("load_module")?;
+        for test in tests {
+            let path = test.file.to_string_lossy().to_string();
+            if imported_paths.insert(path.clone()) {
+                load_module.call1((path,))?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn apply_collection_hooks(tests: Vec<TestItem>) -> Result<Vec<TestItem>> {
+    Python::with_gil(|py| {
+        let py_tests = PyList::empty(py);
+        for test in &tests {
+            py_tests.append(test_item_to_py(py, test))?;
+        }
+        call_py_hook(py, "oxtest_collection_modifyitems", &[py_tests.to_object(py)])?;
+        let mut modified_tests = Vec::new();
+        for item in py_tests.iter() {
+            let dict = item
+                .downcast::<PyDict>()
+                .map_err(|err| anyhow!("Collection hook returned invalid test item: {}", err))?;
+            let file: String = dict.get_item("file").unwrap().extract()?;
+            let name: String = dict.get_item("name").unwrap().extract()?;
+            let full_name: String = dict.get_item("full_name").unwrap().extract()?;
+            let marks: Vec<String> = dict.get_item("marks").unwrap().extract()?;
+            let extra_keywords: Vec<String> = dict.get_item("extra_keywords").unwrap().extract()?;
+            modified_tests.push(TestItem {
+                file: PathBuf::from(file),
+                name,
+                full_name,
+                marks,
+                extra_keywords,
+            });
+        }
+        Ok(modified_tests)
+    })
+}
+
 pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     let mut config = config;
     for plugin in plugin_registry().lock().unwrap().iter() {
@@ -1546,6 +1695,15 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     }
 
     let tests = discover_tests(path, &config)?;
+    import_test_modules(&tests)?;
+
+    Python::with_gil(|py| -> Result<()> {
+        call_py_hook(py, "oxtest_bootstrap", &[])?;
+        call_py_hook(py, "oxtest_sessionstart", &[config_to_py(py, &config)])?;
+        Ok(())
+    })?;
+
+    let tests = apply_collection_hooks(tests)?;
     if tests.is_empty() {
         return Ok(TestSummary {
             results: Vec::new(),
@@ -1562,12 +1720,18 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
 
     let passed = results.iter().filter(|r| r.passed).count();
     let failed = results.len() - passed;
-
-    Ok(TestSummary {
+    let summary = TestSummary {
         results,
         passed,
         failed,
-    })
+    };
+
+    Python::with_gil(|py| -> Result<()> {
+        call_py_hook(py, "oxtest_sessionfinish", &[summary_to_py(py, &summary)])?;
+        Ok(())
+    })?;
+
+    Ok(summary)
 }
 
 fn run_tests_sequential(tests: Vec<TestItem>, config: &RunConfig) -> Result<Vec<TestResult>> {
