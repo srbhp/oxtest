@@ -2,6 +2,29 @@
 
 `oxtest` is a Rust-based Python test runner scaffold using `PyO3` to discover and execute Python tests.
 
+## Install with pip
+
+Create and activate a virtual environment, then install from the repository root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
+```
+
+After installation, the `oxtest` command will be available in the virtual environment:
+
+```bash
+oxtest --help
+```
+
+The install also provides an importable Python package and module entrypoint:
+
+```bash
+python -c "import oxtest; print(oxtest.__version__)"
+python -m oxtest --help
+```
+
 ## Commands
 
 - `cargo run -- list .` — list discovered tests in the current directory
