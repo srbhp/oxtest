@@ -483,6 +483,115 @@ def test_fail():
 }
 
 #[test]
+fn run_tests_exposes_collection_tree_objects() {
+    let dir = tempdir().unwrap();
+    let pkg_dir = dir.path().join("pkg");
+    let conftest = dir.path().join("conftest.py");
+    let init_py = pkg_dir.join("__init__.py");
+    let path = pkg_dir.join("test_tree.py");
+    let log_path = dir.path().join("collection_tree_log.txt");
+
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(&init_py, "").unwrap();
+
+    fs::write(
+        &conftest,
+        format!(
+            r#"
+import pathlib
+import oxtest
+
+LOG = pathlib.Path(r"{log}")
+
+def _log(message):
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(message + "\n")
+
+assert issubclass(oxtest.Collector, oxtest.Node)
+assert issubclass(oxtest.Item, oxtest.Node)
+assert issubclass(oxtest.File, oxtest.FSCollector)
+assert issubclass(oxtest.FSCollector, oxtest.Collector)
+assert issubclass(oxtest.Session, oxtest.Collector)
+assert issubclass(oxtest.Package, oxtest.FSCollector)
+assert issubclass(oxtest.Module, oxtest.File)
+assert issubclass(oxtest.Class, oxtest.Collector)
+assert issubclass(oxtest.Function, oxtest.Item)
+assert issubclass(oxtest.FunctionDefinition, oxtest.Collector)
+
+@oxtest.hookimpl
+def oxtest_sessionstart(session):
+    _log(
+        "session:"
+        + str(isinstance(session, oxtest.Session))
+        + ":"
+        + str(isinstance(session, oxtest.Collector))
+        + ":"
+        + str(isinstance(session, oxtest.Node))
+    )
+
+@oxtest.hookimpl
+def oxtest_collect_file(file_path, parent):
+    if file_path.name == "test_tree.py":
+        _log(
+            "collect_file:"
+            + type(parent).__name__
+            + ":"
+            + str(isinstance(parent, oxtest.Module))
+            + ":"
+            + str(isinstance(parent, oxtest.File))
+        )
+    return None
+
+@oxtest.hookimpl
+def oxtest_collection_modifyitems(config, items):
+    for item in items:
+        if item.full_name == "TestExample.test_child":
+            chain = ">".join(type(node).__name__ for node in item.listchain())
+            _log("item_type:" + type(item).__name__)
+            _log("function_parent:" + type(item.parent).__name__)
+            _log("class_parent:" + type(item.getparent(oxtest.Class)).__name__)
+            _log("module_parent:" + type(item.getparent(oxtest.Module)).__name__)
+            package = item.getparent(oxtest.Package)
+            _log("package_parent:" + getattr(package, "name", ""))
+            _log("chain:" + chain)
+"#,
+            log = log_path.display()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        &path,
+        r#"
+import oxtest
+
+def test_top_level():
+    assert issubclass(oxtest.FunctionDefinition, oxtest.Collector)
+
+class TestExample:
+    def test_child(self):
+        assert issubclass(oxtest.Module, oxtest.File)
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+    let log = fs::read_to_string(&log_path).unwrap();
+
+    assert_eq!(summary.passed, 2);
+    assert_eq!(summary.failed, 0);
+    assert!(log.contains("session:True:True:True"));
+    assert!(log.contains("collect_file:_Module:True:True"));
+    assert!(log.contains("item_type:_Function"));
+    assert!(log.contains("function_parent:_FunctionDefinition"));
+    assert!(log.contains("class_parent:_Class"));
+    assert!(log.contains("module_parent:_Module"));
+    assert!(log.contains("package_parent:pkg"));
+    assert!(log.contains("chain:_Session>_Package>_Module>_Class>_FunctionDefinition>_Function"));
+}
+
+#[test]
 fn run_tests_reports_pytest_fail() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test_pytest_fail.py");

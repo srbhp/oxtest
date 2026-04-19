@@ -1029,10 +1029,128 @@ def _ensure_oxtest_module():
         def option(self):
             return types.SimpleNamespace(**self._values)
 
-    class _Session:
-        def __init__(self, config):
-            self.config = config
+    class _Node:
+        def __init__(self, name, parent=None, path=None, config=None):
+            self.name = name
+            self.parent = parent
+            self.path = pathlib.Path(path) if path is not None else getattr(parent, "path", None)
+            self.config = config if config is not None else getattr(parent, "config", None)
+            self.session = self if parent is None else getattr(parent, "session", None)
+            self.user_properties = []
+            self.own_markers = []
+            self.marks = self.own_markers
+            self.extra_keywords = []
+            self.keywords = {}
+            self._nodeid = self._build_nodeid()
+
+        @classmethod
+        def from_parent(cls, parent, **kwargs):
+            return cls(parent=parent, config=getattr(parent, "config", None), **kwargs)
+
+        def _build_nodeid(self):
+            if self.parent is None:
+                return self.name
+            parent_id = getattr(self.parent, "nodeid", "")
+            if parent_id:
+                return f"{parent_id}::{self.name}"
+            return self.name
+
+        @property
+        def nodeid(self):
+            return self._nodeid
+
+        @property
+        def fspath(self):
+            return str(self.path) if self.path is not None else None
+
+        def listchain(self):
+            chain = []
+            current = self
+            while current is not None:
+                chain.append(current)
+                current = getattr(current, "parent", None)
+            return list(reversed(chain))
+
+        def getparent(self, cls):
+            current = getattr(self, "parent", None)
+            while current is not None:
+                if isinstance(current, cls):
+                    return current
+                current = getattr(current, "parent", None)
+            return None
+
+        def add_marker(self, marker):
+            if isinstance(marker, _MarkDecorator):
+                mark_name = marker.name
+            elif isinstance(marker, str):
+                mark_name = marker
+            else:
+                mark_name = getattr(marker, "name", None) or getattr(marker, "__name__", None) or str(marker)
+            if mark_name not in self.own_markers:
+                self.own_markers.append(mark_name)
+            if mark_name not in self.extra_keywords:
+                self.extra_keywords.append(mark_name)
+            self.keywords[mark_name] = True
+
+    class _Collector(_Node):
+        def __init__(self, name, parent=None, path=None, config=None):
+            super().__init__(name=name, parent=parent, path=path, config=config)
+            self.children = []
+
+        def collect(self):
+            return list(self.children)
+
+    class _FSCollector(_Collector):
+        pass
+
+    class _File(_FSCollector):
+        pass
+
+    class _Session(_Collector):
+        def __init__(self, config, path=None):
+            super().__init__(name=str(pathlib.Path(path).resolve()) if path is not None else "session", parent=None, path=path, config=config)
+            self.session = self
             self.testscollected = 0
+
+    class _Package(_FSCollector):
+        pass
+
+    class _Module(_File):
+        pass
+
+    class _Class(_Collector):
+        pass
+
+    class _Item(_Node):
+        def __init__(self, name, parent=None, path=None, config=None, marks=None, extra_keywords=None, full_name=None):
+            super().__init__(name=name, parent=parent, path=path, config=config)
+            self.user_properties = []
+            self.own_markers = list(marks or [])
+            self.marks = self.own_markers
+            self.extra_keywords = list(extra_keywords or [])
+            self.keywords = {keyword: True for keyword in self.extra_keywords}
+            for mark in self.own_markers:
+                self.keywords[mark] = True
+            self.full_name = full_name or name
+
+        def to_dict(self):
+            return {
+                "file": str(self.path) if self.path is not None else "",
+                "name": self.name,
+                "full_name": self.full_name,
+                "marks": list(self.own_markers),
+                "extra_keywords": list(self.extra_keywords),
+            }
+
+    class _FunctionDefinition(_Collector):
+        def __init__(self, name, parent=None, path=None, config=None, full_name=None):
+            super().__init__(name=name, parent=parent, path=path, config=config)
+            self.full_name = full_name or name
+
+    class _Function(_Item):
+        def __init__(self, name, parent=None, path=None, config=None, marks=None, extra_keywords=None, full_name=None, originalname=None):
+            super().__init__(name=name, parent=parent, path=path, config=config, marks=marks, extra_keywords=extra_keywords, full_name=full_name)
+            self.originalname = originalname or name
 
     class _Report:
         def __init__(self, when, passed, failed, skipped, output, longrepr=""):
@@ -1055,36 +1173,6 @@ def _ensure_oxtest_module():
         def write_line(self, line):
             self.lines.append(str(line))
             print(line)
-
-    class _TestItem:
-        def __init__(self, file, name, full_name, marks=None, extra_keywords=None):
-            self.file = file
-            self.name = name
-            self.full_name = full_name
-            self.marks = list(marks or [])
-            self.extra_keywords = list(extra_keywords or [])
-            self.user_properties = []
-
-        def add_marker(self, marker):
-            if isinstance(marker, _MarkDecorator):
-                mark_name = marker.name
-            elif isinstance(marker, str):
-                mark_name = marker
-            else:
-                mark_name = getattr(marker, "name", None) or getattr(marker, "__name__", None) or str(marker)
-            if mark_name not in self.marks:
-                self.marks.append(mark_name)
-            if mark_name not in self.extra_keywords:
-                self.extra_keywords.append(mark_name)
-
-        def to_dict(self):
-            return {
-                "file": self.file,
-                "name": self.name,
-                "full_name": self.full_name,
-                "marks": list(self.marks),
-                "extra_keywords": list(self.extra_keywords),
-            }
 
     def _sort_hook_impls(name):
         _HOOK_IMPLS[name].sort(
@@ -1223,9 +1311,30 @@ def _ensure_oxtest_module():
     module._register_plugin_object = _register_plugin_object
     module._plugin_manager = _PLUGIN_MANAGER
     module._Parser = _Parser
+    module.Node = _Node
+    module.Collector = _Collector
+    module.Item = _Item
+    module.File = _File
+    module.FSCollector = _FSCollector
     module._Config = _Config
     module._Session = _Session
-    module._TestItem = _TestItem
+    module.Session = _Session
+    module.Package = _Package
+    module.Module = _Module
+    module.Class = _Class
+    module.Function = _Function
+    module.FunctionDefinition = _FunctionDefinition
+    module._TestItem = _Function
+    module._Node = _Node
+    module._Collector = _Collector
+    module._Item = _Item
+    module._File = _File
+    module._FSCollector = _FSCollector
+    module._Package = _Package
+    module._Module = _Module
+    module._Class = _Class
+    module._Function = _Function
+    module._FunctionDefinition = _FunctionDefinition
     module._Report = _Report
     module._CallInfo = _CallInfo
     module._TerminalReporter = _TerminalReporter
@@ -1585,22 +1694,85 @@ def _build_config(config_values):
     return oxtest_module._Config(config_values or {})
 
 
-def _build_session(config):
+def _build_session(config, path=None):
     _ensure_oxtest_module()
     oxtest_module = sys.modules["oxtest"]
-    return oxtest_module._Session(config)
+    return oxtest_module._Session(config, path=path)
+
+
+def _append_child(parent, child):
+    if parent is not None and hasattr(parent, "children") and child not in parent.children:
+        parent.children.append(child)
+
+
+def _package_chain_for_path(path, session):
+    oxtest_module = sys.modules["oxtest"]
+    path = pathlib.Path(path).resolve()
+    chain = []
+    current = path.parent
+    while current != current.parent:
+        if not (current / "__init__.py").exists():
+            break
+        chain.append(current)
+        current = current.parent
+    parent = session
+    created = []
+    for package_path in reversed(chain):
+        package = oxtest_module._Package.from_parent(parent, name=package_path.name, path=package_path)
+        _append_child(parent, package)
+        created.append(package)
+        parent = package
+    return parent, created
+
+
+def _build_collection_item(data, session=None, config=None):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    path = pathlib.Path(data["file"]).resolve()
+    config = config or (session.config if session is not None else _build_config({}))
+    if session is None:
+        session = _build_session(config, path=path.parent)
+    parent, _ = _package_chain_for_path(path, session)
+    module = oxtest_module._Module.from_parent(parent, name=path.name, path=path)
+    _append_child(parent, module)
+
+    full_name = data["full_name"]
+    base_name = _strip_param_id(full_name)
+    function_name = base_name.split(".")[-1]
+    original_name = function_name
+
+    if "." in base_name:
+        class_name, function_name = base_name.split(".", 1)
+        class_collector = oxtest_module._Class.from_parent(module, name=class_name, path=path)
+        _append_child(module, class_collector)
+        definition_parent = class_collector
+    else:
+        definition_parent = module
+
+    function_definition = oxtest_module._FunctionDefinition.from_parent(
+        definition_parent,
+        name=function_name,
+        path=path,
+        full_name=base_name,
+    )
+    _append_child(definition_parent, function_definition)
+    function = oxtest_module._Function.from_parent(
+        function_definition,
+        name=function_name,
+        path=path,
+        marks=data.get("marks", []),
+        extra_keywords=data.get("extra_keywords", []),
+        full_name=full_name,
+        originalname=original_name,
+    )
+    _append_child(function_definition, function)
+    return function
 
 
 def _dict_to_test_item(data):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    return oxtest_module._TestItem(
-        data["file"],
-        data["name"],
-        data["full_name"],
-        data.get("marks", []),
-        data.get("extra_keywords", []),
-    )
+    session = getattr(sys.modules.get("oxtest"), "_active_session", None)
+    config = getattr(sys.modules.get("oxtest"), "_active_config", None)
+    return _build_collection_item(data, session=session, config=config)
 
 
 def _report_to_dict(report):
@@ -1654,7 +1826,7 @@ def begin_test_session(path, config_values):
         elif isinstance(header, (list, tuple)):
             for line in header:
                 print(line)
-    session = _build_session(config)
+    session = _build_session(config, path=path)
     oxtest_module._active_config = config
     oxtest_module._active_session = session
     _invoke_hook("oxtest_sessionstart", session)
@@ -1692,12 +1864,44 @@ def should_ignore_collect(path, config_values=None):
     return bool(results)
 
 
+def _normalize_collected_result(result):
+    if result is None:
+        return None
+    if hasattr(result, "collect"):
+        return [_node_to_test_dict(item) for item in result.collect()]
+    if isinstance(result, (list, tuple)):
+        normalized = []
+        for item in result:
+            if hasattr(item, "to_dict"):
+                normalized.append(item.to_dict())
+            elif isinstance(item, dict):
+                normalized.append(item)
+        return normalized
+    if hasattr(result, "to_dict"):
+        return [result.to_dict()]
+    if isinstance(result, dict):
+        return [result]
+    return None
+
+
+def _node_to_test_dict(item):
+    if hasattr(item, "to_dict"):
+        return item.to_dict()
+    return item
+
+
 def discover_with_hooks(path):
     path_obj = pathlib.Path(path)
     _load_conftests_for(path_obj)
-    custom = _invoke_hook("oxtest_collect_file", path_obj, None)
+    oxtest_module = sys.modules["oxtest"]
+    config = getattr(oxtest_module, "_active_config", None) or _build_config({})
+    session = getattr(oxtest_module, "_active_session", None) or _build_session(config, path=path_obj.parent)
+    parent = oxtest_module._Module.from_parent(session, name=path_obj.name, path=path_obj)
+    custom = _invoke_hook("oxtest_collect_file", path_obj, parent)
     if custom is not None:
-        return custom
+        normalized = _normalize_collected_result(custom)
+        if normalized is not None:
+            return normalized
     return discover(path)
 
 

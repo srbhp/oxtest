@@ -101,6 +101,17 @@ def oxtest_sessionfinish(session, exitstatus):
 # ---------------------------------------------------------------------------
 
 
+assert issubclass(oxtest.Collector, oxtest.Node)
+assert issubclass(oxtest.Item, oxtest.Node)
+assert issubclass(oxtest.File, oxtest.FSCollector)
+assert issubclass(oxtest.Session, oxtest.Collector)
+assert issubclass(oxtest.Package, oxtest.FSCollector)
+assert issubclass(oxtest.Module, oxtest.File)
+assert issubclass(oxtest.Class, oxtest.Collector)
+assert issubclass(oxtest.Function, oxtest.Item)
+assert issubclass(oxtest.FunctionDefinition, oxtest.Collector)
+
+
 @hookimpl
 def oxtest_ignore_collect(collection_path, config):
     """Skip generated folders during collection."""
@@ -127,6 +138,9 @@ def oxtest_collection_modifyitems(config, items):
     for item in items:
         if "hooks" in item.name:
             item.add_marker(oxtest.mark.demo)
+        _ = item.nodeid
+        _ = item.listchain()
+        _ = item.getparent(oxtest.Module)
 
 
 # ---------------------------------------------------------------------------
