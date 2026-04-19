@@ -321,6 +321,168 @@ def test_xfail():
 }
 
 #[test]
+fn discover_tests_respects_oxtest_ignore_collect_hook() {
+    let dir = tempdir().unwrap();
+    let conftest = dir.path().join("conftest.py");
+    let kept = dir.path().join("test_kept.py");
+    let ignored = dir.path().join("test_ignored.py");
+
+    fs::write(
+        &conftest,
+        r#"
+import oxtest
+
+@oxtest.hookimpl
+def oxtest_ignore_collect(collection_path, config):
+    return collection_path.name == "test_ignored.py"
+"#,
+    )
+    .unwrap();
+
+    fs::write(&kept, "def test_kept():\n    assert True\n").unwrap();
+    fs::write(&ignored, "def test_ignored():\n    assert True\n").unwrap();
+
+    let config = make_config();
+    let items = discover_tests(dir.path().to_str().unwrap(), &config).unwrap();
+    let names: Vec<String> = items.into_iter().map(|item| item.full_name).collect();
+
+    assert_eq!(names, vec!["test_kept".to_string()]);
+}
+
+#[test]
+fn run_tests_executes_oxtest_hook_lifecycle() {
+    let dir = tempdir().unwrap();
+    let conftest = dir.path().join("conftest.py");
+    let path = dir.path().join("test_hooks_runtime.py");
+    let log_path = dir.path().join("hook_log.txt");
+
+    fs::write(
+        &conftest,
+        format!(
+            r#"
+import pathlib
+import oxtest
+
+LOG = pathlib.Path(r"{log}")
+
+def _log(message):
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(message + "\n")
+
+class ExampleSpecs:
+    @oxtest.hookspec(firstresult=True)
+    def oxtest_example_transform(self, value):
+        """Return a transformed value."""
+
+@oxtest.hookimpl
+def oxtest_addhooks(pluginmanager):
+    pluginmanager.add_hookspecs(ExampleSpecs)
+    _log("addhooks")
+
+@oxtest.hookimpl
+def oxtest_plugin_registered(plugin, plugin_name, manager):
+    _log(f"registered:{{plugin_name}}")
+
+@oxtest.hookimpl
+def oxtest_addoption(parser):
+    parser.addoption("--demo-flag", action="store_true", default=True, help="demo")
+    _log("addoption")
+
+@oxtest.hookimpl
+def oxtest_configure(config):
+    _log(f"configure:{{config.getoption('--demo-flag')}}")
+
+@oxtest.hookimpl
+def oxtest_report_header(config):
+    _log("report_header")
+    return ["hook header"]
+
+@oxtest.hookimpl
+def oxtest_sessionstart(session):
+    _log("sessionstart")
+
+@oxtest.hookimpl
+def oxtest_collection_modifyitems(config, items):
+    _log(f"modifyitems:{{len(items)}}")
+    for item in items:
+        item.add_marker("hooked")
+
+@oxtest.hookimpl
+def oxtest_runtest_setup(item):
+    _log(f"setup:{{item.full_name}}")
+
+@oxtest.hookimpl
+def oxtest_runtest_call(item):
+    _log(f"call:{{item.full_name}}")
+
+@oxtest.hookimpl
+def oxtest_runtest_teardown(item, nextitem):
+    next_name = getattr(nextitem, "full_name", None)
+    _log(f"teardown:{{item.full_name}}:{{next_name}}")
+
+@oxtest.hookimpl(wrapper=True)
+def oxtest_runtest_makereport(item, call):
+    _log(f"makereport-before:{{item.full_name}}")
+    outcome = yield
+    report = outcome.get_result()
+    _log(f"makereport-after:{{item.full_name}}:{{report.outcome}}")
+
+@oxtest.hookimpl
+def oxtest_exception_interact(node, call, report):
+    _log(f"exception:{{node.full_name}}:{{report.outcome}}")
+
+@oxtest.hookimpl
+def oxtest_sessionfinish(session, exitstatus):
+    _log(f"sessionfinish:{{exitstatus}}")
+
+@oxtest.hookimpl
+def oxtest_terminal_summary(terminalreporter, exitstatus, config):
+    _log(f"terminal_summary:{{exitstatus}}")
+"#,
+            log = log_path.display()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        &path,
+        r#"
+def test_pass():
+    assert True
+
+def test_fail():
+    assert False
+"#,
+    )
+    .unwrap();
+
+    let config = make_config();
+    let summary = run_tests(dir.path().to_str().unwrap(), config).unwrap();
+    let log = fs::read_to_string(&log_path).unwrap();
+
+    assert_eq!(summary.passed, 1);
+    assert_eq!(summary.failed, 1);
+    assert!(summary
+        .results
+        .iter()
+        .all(|result| result.marks.iter().any(|mark| mark == "hooked")));
+    assert!(log.contains("addhooks"));
+    assert!(log.contains("addoption"));
+    assert!(log.contains("configure:True"));
+    assert!(log.contains("report_header"));
+    assert!(log.contains("sessionstart"));
+    assert!(log.contains("modifyitems:2"));
+    assert!(log.contains("setup:test_fail"));
+    assert!(log.contains("call:test_fail"));
+    assert!(log.contains("exception:test_fail:failed"));
+    assert!(log.contains("makereport-before:test_fail"));
+    assert!(log.contains("makereport-after:test_fail:failed"));
+    assert!(log.contains("teardown:test_pass:None") || log.contains("teardown:test_pass:test_fail"));
+    assert!(log.contains("sessionfinish:1"));
+    assert!(log.contains("terminal_summary:1"));
+}
+
+#[test]
 fn run_tests_reports_pytest_fail() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test_pytest_fail.py");

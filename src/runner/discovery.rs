@@ -15,6 +15,15 @@ pub fn discover_tests(path: &str, config: &RunConfig) -> Result<Vec<TestItem>> {
         plugin.configure(&mut config);
     }
 
+    Python::with_gil(|py| -> Result<()> {
+        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let reset = module.getattr("_ensure_oxtest_module")?;
+        reset.call0()?;
+        let oxtest = PyModule::import(py, "oxtest")?;
+        oxtest.getattr("_reset_hooks")?.call0()?;
+        Ok(())
+    })?;
+
     let base = Path::new(path);
     let globset = build_ignore_globset(&config.ignore_glob)?;
     let walker = WalkDir::new(base).into_iter();
@@ -31,6 +40,9 @@ pub fn discover_tests(path: &str, config: &RunConfig) -> Result<Vec<TestItem>> {
         }
 
         if is_ignored(entry.path(), base, &config.ignore, &globset) {
+            continue;
+        }
+        if hook_ignores_path(entry.path(), &config)? {
             continue;
         }
 
@@ -142,7 +154,7 @@ fn matches_ignore_path(path: &Path, base: &Path, ignore: &Path) -> bool {
 fn discover_file(path: &Path) -> Result<Option<Vec<TestItem>>> {
     Python::with_gil(|py| {
         let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
-        let discover = module.getattr("discover")?;
+        let discover = module.getattr("discover_with_hooks")?;
         let result = discover.call1((path.to_str().unwrap(),))?;
         let list = result
             .downcast::<PyList>()
@@ -167,6 +179,29 @@ fn discover_file(path: &Path) -> Result<Option<Vec<TestItem>>> {
 
         Ok(Some(items))
     })
+}
+
+fn hook_ignores_path(path: &Path, config: &RunConfig) -> Result<bool> {
+    Python::with_gil(|py| {
+        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let ignore = module.getattr("should_ignore_collect")?;
+        let config_dict = PyDict::new(py);
+        config_dict.set_item("k_expr", config.k_expr.clone())?;
+        config_dict.set_item("m_expr", config.m_expr.clone())?;
+        config_dict.set_item("exitfirst", config.exitfirst)?;
+        config_dict.set_item("maxfail", config.maxfail)?;
+        config_dict.set_item("jobs", config.jobs)?;
+        config_dict.set_item("ignore_glob", config.ignore_glob.clone())?;
+        config_dict.set_item("collect_only", config.collect_only)?;
+        config_dict.set_item("quiet", config.quiet)?;
+        config_dict.set_item("verbose", config.verbose)?;
+        config_dict.set_item("strict", config.strict)?;
+        config_dict.set_item("strict_markers", config.strict_markers)?;
+        config_dict.set_item("strict_config", config.strict_config)?;
+        let result = ignore.call1((path.to_str().unwrap(), config_dict))?;
+        result.extract()
+    })
+    .map_err(|err| anyhow!("Failed to run ignore_collect hook: {}", err))
 }
 
 fn match_keyword(expr: &str, test_name: &str, extra_names: &[String]) -> Result<bool> {

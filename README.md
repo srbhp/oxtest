@@ -25,21 +25,6 @@ python -c "import oxtest; print(oxtest.__version__)"
 python -m oxtest --help
 ```
 
-## Commands
-
-- `cargo run -- list .` — list discovered tests in the current directory
-- `cargo run -- list . --json` — list discovered tests as JSON
-- `cargo run -- run .` — run discovered tests in the current directory
-- `cargo run -- run . --jobs 4` — run tests in parallel using 4 workers
-- `cargo run -- run . -k 'test_method or test_other'` — run tests matching a keyword expression
-- `cargo run -- run . -m 'slow and not network'` — run tests matching a mark expression
-- `cargo run -- run . -x --maxfail 1` — stop on the first failure
-- `cargo run -- run . --collect-only` — collect tests without executing them
-- `cargo run -- run . --markers` — show marker names discovered in the suite
-- `cargo run -- run . --fixtures` — show available fixtures discovered in the suite
-- `cargo run -- run . --fixtures-per-test` — show fixture usage for each discovered test
-- `cargo run -- run . --ignore=build --ignore-glob='**/tests/*'` — ignore files during collection
-- `cargo run -- run . --json` — print test results as JSON
 
 ## Features
 

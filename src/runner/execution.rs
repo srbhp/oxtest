@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use super::plugin::plugin_registry;
@@ -9,14 +10,10 @@ use super::discovery::discover_tests;
 use super::python::PY_HELPER;
 use super::types::{RunConfig, TestItem, TestResult, TestSummary};
 
-fn call_py_hook(py: Python<'_>, name: &str, args: &[PyObject]) -> Result<()> {
-    let module = PyModule::import(py, "oxtest")?;
-    let call_hook = module.getattr("_call_hook")?;
-    let arguments: Vec<PyObject> = std::iter::once(name.to_object(py))
-        .chain(args.iter().cloned())
-        .collect();
-    call_hook.call(PyTuple::new(py, arguments), None)?;
-    Ok(())
+#[derive(Deserialize)]
+struct MarshaledTestResult {
+    passed: bool,
+    output: String,
 }
 
 fn test_item_to_py<'py>(py: Python<'py>, test: &TestItem) -> PyObject {
@@ -95,13 +92,18 @@ fn import_test_modules(tests: &[TestItem]) -> Result<()> {
 
 fn apply_collection_hooks(tests: Vec<TestItem>) -> Result<Vec<TestItem>> {
     Python::with_gil(|py| {
+        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
         let py_tests = PyList::empty(py);
         for test in &tests {
             py_tests.append(test_item_to_py(py, test))?;
         }
-        call_py_hook(py, "oxtest_collection_modifyitems", &[py_tests.to_object(py)])?;
+        let apply = helper.getattr("apply_collection_hooks")?;
+        let result = apply.call1((py_tests,))?;
+        let result_list = result
+            .downcast::<PyList>()
+            .map_err(|err| anyhow!("Collection hook returned invalid result list: {}", err))?;
         let mut modified_tests = Vec::new();
-        for item in py_tests.iter() {
+        for item in result_list.iter() {
             let dict = item
                 .downcast::<PyDict>()
                 .map_err(|err| anyhow!("Collection hook returned invalid test item: {}", err))?;
@@ -132,8 +134,9 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     import_test_modules(&tests)?;
 
     Python::with_gil(|py| -> Result<()> {
-        call_py_hook(py, "oxtest_bootstrap", &[])?;
-        call_py_hook(py, "oxtest_sessionstart", &[config_to_py(py, &config)])?;
+        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let begin = helper.getattr("begin_test_session")?;
+        begin.call1((path, config_to_py(py, &config)))?;
         Ok(())
     })?;
 
@@ -157,7 +160,9 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     let summary = TestSummary { results, passed, failed };
 
     Python::with_gil(|py| -> Result<()> {
-        call_py_hook(py, "oxtest_sessionfinish", &[summary_to_py(py, &summary)])?;
+        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let finish = helper.getattr("finish_test_session")?;
+        finish.call1((summary_to_py(py, &summary), config_to_py(py, &config)))?;
         Ok(())
     })?;
 
@@ -168,10 +173,11 @@ fn run_tests_sequential(tests: Vec<TestItem>, config: &RunConfig) -> Result<Vec<
     let mut results = Vec::new();
     let mut failures = 0;
 
-    for test in tests {
-        let result = run_test_item(&test)?;
+    for (index, test) in tests.iter().enumerate() {
+        let next_test = tests.get(index + 1);
+        let result = run_test_item(test, next_test, config)?;
         for plugin in plugin_registry().lock().unwrap().iter() {
-            plugin.after_test(&test, &result);
+            plugin.after_test(test, &result);
         }
         if !result.passed {
             failures += 1;
@@ -198,7 +204,7 @@ fn run_tests_parallel(tests: Vec<TestItem>, _config: &RunConfig) -> Result<Vec<T
         tests
             .into_par_iter()
             .map(|test| {
-                let result = run_test_item(&test)?;
+                let result = run_test_item(&test, None, _config)?;
                 for plugin in &plugins {
                     plugin.after_test(&test, &result);
                 }
@@ -208,11 +214,11 @@ fn run_tests_parallel(tests: Vec<TestItem>, _config: &RunConfig) -> Result<Vec<T
     })
 }
 
-pub fn run_test_item(test: &TestItem) -> Result<TestResult> {
+pub fn run_test_item(test: &TestItem, next_test: Option<&TestItem>, config: &RunConfig) -> Result<TestResult> {
     for plugin in plugin_registry().lock().unwrap().iter() {
         plugin.before_test(test);
     }
-    let (passed, output) = run_test(test)?;
+    let (passed, output) = run_test(test, next_test, config)?;
     let result = TestResult {
         file: test.file.clone(),
         full_name: test.full_name.clone(),
@@ -223,12 +229,20 @@ pub fn run_test_item(test: &TestItem) -> Result<TestResult> {
     Ok(result)
 }
 
-fn run_test(test: &TestItem) -> Result<(bool, String)> {
+fn run_test(test: &TestItem, next_test: Option<&TestItem>, config: &RunConfig) -> Result<(bool, String)> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
-        let run_test = module.getattr("run_test")?;
-        let result = run_test.call1((test.file.to_str().unwrap(), test.full_name.as_str()))?;
-        let tuple: (bool, String) = result.extract()?;
-        Ok(tuple)
+        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let run_test = helper.getattr("run_test_marshaled")?;
+        let next_name = next_test.map(|item| item.full_name.clone());
+        let result = run_test.call1((
+            test.file.to_str().unwrap(),
+            test.full_name.as_str(),
+            config_to_py(py, config),
+            next_name,
+        ))?;
+        let payload: String = result.extract()?;
+        let parsed: MarshaledTestResult = serde_json::from_str(&payload)
+            .map_err(|err| anyhow!("Failed to parse Python test result payload: {}", err))?;
+        Ok((parsed.passed, parsed.output))
     })
 }

@@ -1,6 +1,7 @@
 pub(super) const PY_HELPER: &str = r#"
 import ast
 import importlib.util
+import json
 import pathlib
 import sys
 import traceback
@@ -548,19 +549,70 @@ def fixtures_per_test(path):
     return tests
 
 
+def _module_name_for_path(path, prefix):
+    return f"{prefix}_{re.sub(r'[^0-9a-zA-Z]+', '_', str(path))}"
+
+
+def _register_loaded_plugin(module, module_name):
+    oxtest_module = sys.modules.get("oxtest")
+    if oxtest_module is not None and hasattr(oxtest_module, "_register_plugin_object"):
+        oxtest_module._register_plugin_object(module, module_name)
+
+
+def _load_python_module(path, prefix):
+    path = pathlib.Path(path).resolve()
+    module_name = _module_name_for_path(path, prefix)
+    if module_name in sys.modules:
+        module = sys.modules[module_name]
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    module.__oxtest_source_path__ = str(path)
+    _register_loaded_plugin(module, module_name)
+    return module
+
+
+def _iter_conftest_paths(path):
+    path = pathlib.Path(path).resolve()
+    directories = [path if path.is_dir() else path.parent]
+    current = directories[0]
+    while current != current.parent:
+        current = current.parent
+        directories.append(current)
+    directories.reverse()
+    for directory in directories:
+        candidate = directory / "conftest.py"
+        if candidate.exists():
+            yield candidate
+
+
+def _load_conftests_for(path):
+    for conftest_path in _iter_conftest_paths(path):
+        _load_python_module(conftest_path, "oxtest_conftest")
+
+
+def _register_loaded_plugins(root_path=None):
+    root = pathlib.Path(root_path).resolve() if root_path is not None else None
+    for module_name, module in list(sys.modules.items()):
+        if module_name.startswith("oxtest_module_") or module_name.startswith("oxtest_conftest_"):
+            source = getattr(module, "__oxtest_source_path__", None)
+            if root is not None and source is not None:
+                try:
+                    pathlib.Path(source).resolve().relative_to(root)
+                except Exception:
+                    continue
+            _register_loaded_plugin(module, module_name)
+
+
 def load_module(path):
     path = pathlib.Path(path)
     _ensure_package_root(path)
     _ensure_oxtest_module()
     _ensure_pytest_module()
-    module_name = f"oxtest_module_{re.sub(r'[^0-9a-zA-Z]+', '_', str(path))}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    spec = importlib.util.spec_from_file_location(module_name, str(path))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+    _load_conftests_for(path)
+    return _load_python_module(path, "oxtest_module")
 
 
 def _apply_fixture(func, *args):
@@ -763,14 +815,27 @@ def _ensure_oxtest_module():
         def __repr__(self):
             return f"approx({self.expected!r})"
 
+    class _MarkDecorator:
+        def __init__(self, name, args=(), kwargs=None):
+            self.name = name
+            self.args = tuple(args)
+            self.kwargs = dict(kwargs or {})
+
+        def __call__(self, func):
+            marks = list(getattr(func, "__oxtest_marks__", []))
+            marks.append({"name": self.name, "args": list(self.args), "kwargs": dict(self.kwargs)})
+            func.__oxtest_marks__ = marks
+            return func
+
+        def __repr__(self):
+            return f"<oxtest mark {self.name}>"
+
     class _Mark:
         def __getattr__(self, name):
             def marker(*args, **kwargs):
                 if len(args) == 1 and callable(args[0]) and not kwargs:
-                    return args[0]
-                def _inner(fn):
-                    return fn
-                return _inner
+                    return _MarkDecorator(name)(args[0])
+                return _MarkDecorator(name, args, kwargs)
             return marker
 
     class _Param(tuple):
@@ -900,40 +965,270 @@ def _ensure_oxtest_module():
     def freeze_includes(*args, **kwargs):
         return None
 
-    _HOOK_SPECS = {}
+    _HOOK_SPECS = {
+        "oxtest_collect_file": {"name": "oxtest_collect_file", "firstresult": True},
+        "oxtest_runtest_makereport": {"name": "oxtest_runtest_makereport", "firstresult": True},
+    }
     _HOOK_IMPLS = {}
+    _REGISTERED_PLUGINS = {}
+    _ACTIVE_CONFIG = None
+    _ACTIVE_SESSION = None
+
+    class _HookOutcome:
+        def __init__(self, thunk):
+            self._thunk = thunk
+            self._done = False
+            self._result = None
+            self._error = None
+
+        def get_result(self):
+            if not self._done:
+                try:
+                    self._result = self._thunk()
+                except Exception as err:
+                    self._error = err
+                self._done = True
+            if self._error is not None:
+                raise self._error
+            return self._result
+
+    class _PluginManager:
+        def add_hookspecs(self, obj):
+            _register_hookspecs_from_object(obj)
+            return obj
+
+        def register(self, plugin, name=None):
+            return _register_plugin_object(plugin, name)
+
+    class _Parser:
+        def __init__(self):
+            self.options = {}
+
+        def addoption(self, name, action="store", default=None, help=None):
+            self.options[name] = {
+                "action": action,
+                "default": default,
+                "help": help,
+            }
+
+    class _Config:
+        def __init__(self, values=None):
+            self._values = dict(values or {})
+            self._ini = {}
+
+        def addinivalue_line(self, name, line):
+            self._ini.setdefault(name, []).append(line)
+
+        def getoption(self, name, default=None):
+            normalized = name.lstrip("-").replace("-", "_")
+            if name in self._values:
+                return self._values[name]
+            return self._values.get(normalized, default)
+
+        @property
+        def option(self):
+            return types.SimpleNamespace(**self._values)
+
+    class _Session:
+        def __init__(self, config):
+            self.config = config
+            self.testscollected = 0
+
+    class _Report:
+        def __init__(self, when, passed, failed, skipped, output, longrepr=""):
+            self.when = when
+            self.passed = passed
+            self.failed = failed
+            self.skipped = skipped
+            self.outcome = "passed" if passed else "skipped" if skipped else "failed"
+            self.longrepr = longrepr or output
+
+    class _CallInfo:
+        def __init__(self, when, excinfo=None):
+            self.when = when
+            self.excinfo = excinfo
+
+    class _TerminalReporter:
+        def __init__(self):
+            self.lines = []
+
+        def write_line(self, line):
+            self.lines.append(str(line))
+            print(line)
+
+    class _TestItem:
+        def __init__(self, file, name, full_name, marks=None, extra_keywords=None):
+            self.file = file
+            self.name = name
+            self.full_name = full_name
+            self.marks = list(marks or [])
+            self.extra_keywords = list(extra_keywords or [])
+            self.user_properties = []
+
+        def add_marker(self, marker):
+            if isinstance(marker, _MarkDecorator):
+                mark_name = marker.name
+            elif isinstance(marker, str):
+                mark_name = marker
+            else:
+                mark_name = getattr(marker, "name", None) or getattr(marker, "__name__", None) or str(marker)
+            if mark_name not in self.marks:
+                self.marks.append(mark_name)
+            if mark_name not in self.extra_keywords:
+                self.extra_keywords.append(mark_name)
+
+        def to_dict(self):
+            return {
+                "file": self.file,
+                "name": self.name,
+                "full_name": self.full_name,
+                "marks": list(self.marks),
+                "extra_keywords": list(self.extra_keywords),
+            }
 
     def _sort_hook_impls(name):
-        _HOOK_IMPLS[name].sort(key=lambda item: (not item[1], item[2]))
+        _HOOK_IMPLS[name].sort(
+            key=lambda item: (
+                -int(item["tryfirst"]),
+                int(item["trylast"]),
+                item["plugin_name"],
+                item["func"].__name__,
+            )
+        )
 
-    def hookspec(func):
-        _HOOK_SPECS[func.__name__] = func
-        return func
-
-    def hookimpl(func=None, *, specname=None, tryfirst=False, trylast=False):
+    def hookspec(func=None, *, firstresult=False):
         def decorator(fn):
-            name = specname or fn.__name__
-            if name not in _HOOK_IMPLS:
-                _HOOK_IMPLS[name] = []
-            if not any(item[0] is fn for item in _HOOK_IMPLS[name]):
-                _HOOK_IMPLS[name].append((fn, tryfirst, trylast))
-                _sort_hook_impls(name)
+            fn.__oxtest_hookspec__ = {
+                "name": fn.__name__,
+                "firstresult": firstresult,
+            }
+            _HOOK_SPECS[fn.__name__] = dict(fn.__oxtest_hookspec__)
             return fn
         if func is None:
             return decorator
         return decorator(func)
 
+    def hookimpl(func=None, *, specname=None, tryfirst=False, trylast=False, wrapper=False):
+        def decorator(fn):
+            fn.__oxtest_hookimpl__ = {
+                "name": specname or fn.__name__,
+                "tryfirst": tryfirst,
+                "trylast": trylast,
+                "wrapper": wrapper,
+            }
+            return fn
+        if func is None:
+            return decorator
+        return decorator(func)
+
+    def _register_hookspecs_from_object(obj):
+        for attr_name in dir(obj):
+            value = getattr(obj, attr_name, None)
+            spec = getattr(value, "__oxtest_hookspec__", None)
+            if spec:
+                _HOOK_SPECS[spec["name"]] = dict(spec)
+
+    def _register_plugin_object(plugin, plugin_name=None):
+        plugin_name = plugin_name or getattr(plugin, "__name__", repr(plugin))
+        entries = {}
+        _register_hookspecs_from_object(plugin)
+        for attr_name in dir(plugin):
+            value = getattr(plugin, attr_name, None)
+            impl = getattr(value, "__oxtest_hookimpl__", None)
+            if not impl:
+                continue
+            entry = {
+                "func": value,
+                "plugin_name": plugin_name,
+                "tryfirst": impl.get("tryfirst", False),
+                "trylast": impl.get("trylast", False),
+                "wrapper": impl.get("wrapper", False),
+            }
+            entries.setdefault(impl["name"], []).append(entry)
+        _REGISTERED_PLUGINS[plugin_name] = {"plugin": plugin, "entries": entries}
+        for name, impls in entries.items():
+            existing = [entry for entry in _HOOK_IMPLS.get(name, []) if entry["plugin_name"] != plugin_name]
+            _HOOK_IMPLS[name] = existing + list(impls)
+            _sort_hook_impls(name)
+        for entry in list(_HOOK_IMPLS.get("oxtest_plugin_registered", [])):
+            entry["func"](plugin, plugin_name, _PLUGIN_MANAGER)
+        return plugin
+
+    def _reset_hooks():
+        _HOOK_SPECS.clear()
+        _HOOK_SPECS.update({
+            "oxtest_collect_file": {"name": "oxtest_collect_file", "firstresult": True},
+            "oxtest_runtest_makereport": {"name": "oxtest_runtest_makereport", "firstresult": True},
+        })
+        _HOOK_IMPLS.clear()
+        _REGISTERED_PLUGINS.clear()
+
+    _MISSING = object()
+
+    def _collect_hook_result(name, impls, args, kwargs, default_result=_MISSING):
+        spec = _HOOK_SPECS.get(name, {})
+        wrappers = [entry for entry in impls if entry.get("wrapper")]
+        regular = [entry for entry in impls if not entry.get("wrapper")]
+
+        def invoke_regular():
+            if spec.get("firstresult"):
+                for entry in regular:
+                    value = entry["func"](*args, **kwargs)
+                    if value is not None:
+                        return value
+                if default_result is not _MISSING:
+                    return default_result() if callable(default_result) else default_result
+                return None
+            if not regular and default_result is not _MISSING:
+                return default_result() if callable(default_result) else default_result
+            return [entry["func"](*args, **kwargs) for entry in regular]
+
+        def invoke_wrapped(index):
+            if index >= len(wrappers):
+                return invoke_regular()
+            generator = wrappers[index]["func"](*args, **kwargs)
+            if not hasattr(generator, "send"):
+                return generator
+            try:
+                next(generator)
+            except StopIteration as stop:
+                return stop.value
+            outcome = _HookOutcome(lambda: invoke_wrapped(index + 1))
+            try:
+                generator.send(outcome)
+            except StopIteration as stop:
+                if stop.value is not None:
+                    return stop.value
+            return outcome.get_result()
+
+        if not impls:
+            return None if spec.get("firstresult") else []
+        return invoke_wrapped(0)
+
     def _call_hook(name, *args, **kwargs):
-        results = []
-        for impl, _, _ in _HOOK_IMPLS.get(name, []):
-            results.append(impl(*args, **kwargs))
-        return results
+        return _collect_hook_result(name, _HOOK_IMPLS.get(name, []), args, kwargs)
+
+    def _call_hook_with_default(name, default_result, *args, **kwargs):
+        return _collect_hook_result(name, _HOOK_IMPLS.get(name, []), args, kwargs, default_result=default_result)
+
+    _PLUGIN_MANAGER = _PluginManager()
 
     module = types.ModuleType("oxtest")
     module.fixture = fixture
     module.hookspec = hookspec
     module.hookimpl = hookimpl
     module._call_hook = _call_hook
+    module._call_hook_with_default = _call_hook_with_default
+    module._reset_hooks = _reset_hooks
+    module._register_plugin_object = _register_plugin_object
+    module._plugin_manager = _PLUGIN_MANAGER
+    module._Parser = _Parser
+    module._Config = _Config
+    module._Session = _Session
+    module._TestItem = _TestItem
+    module._Report = _Report
+    module._CallInfo = _CallInfo
+    module._TerminalReporter = _TerminalReporter
     module.mark = _Mark()
     module.param = param
     module.approx = approx
@@ -1284,8 +1579,148 @@ def match_markexpr(expr, marks):
         return False
 
 
-def run_test(path, test_name):
+def _build_config(config_values):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    return oxtest_module._Config(config_values or {})
+
+
+def _build_session(config):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    return oxtest_module._Session(config)
+
+
+def _dict_to_test_item(data):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    return oxtest_module._TestItem(
+        data["file"],
+        data["name"],
+        data["full_name"],
+        data.get("marks", []),
+        data.get("extra_keywords", []),
+    )
+
+
+def _report_to_dict(report):
+    return {
+        "when": report.when,
+        "passed": report.passed,
+        "failed": report.failed,
+        "skipped": report.skipped,
+        "outcome": report.outcome,
+        "longrepr": report.longrepr,
+    }
+
+
+def _make_report(when, passed, failed, skipped, output):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    return oxtest_module._Report(when, passed, failed, skipped, output)
+
+
+def _invoke_hook(name, *args):
+    _ensure_oxtest_module()
+    return sys.modules["oxtest"]._call_hook(name, *args)
+
+
+def _invoke_hook_with_default(name, default_result, *args):
+    _ensure_oxtest_module()
+    return sys.modules["oxtest"]._call_hook_with_default(name, default_result, *args)
+
+
+def begin_test_session(path, config_values):
+    path = pathlib.Path(path)
+    _ensure_oxtest_module()
+    _ensure_pytest_module()
+    oxtest_module = sys.modules["oxtest"]
+    oxtest_module._reset_hooks()
+    _load_conftests_for(path)
+    _register_loaded_plugins(path)
+    config = _build_config(config_values)
+    parser = oxtest_module._Parser()
+    _invoke_hook("oxtest_addhooks", oxtest_module._plugin_manager)
+    _invoke_hook("oxtest_addoption", parser)
+    for name, option in parser.options.items():
+        normalized = name.lstrip("-").replace("-", "_")
+        config._values.setdefault(normalized, option["default"])
+        config._values.setdefault(name, option["default"])
+    _invoke_hook("oxtest_configure", config)
+    headers = _invoke_hook("oxtest_report_header", config) or []
+    for header in headers:
+        if isinstance(header, str):
+            print(header)
+        elif isinstance(header, (list, tuple)):
+            for line in header:
+                print(line)
+    session = _build_session(config)
+    oxtest_module._active_config = config
+    oxtest_module._active_session = session
+    _invoke_hook("oxtest_sessionstart", session)
+
+
+def finish_test_session(summary, config_values):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    config = getattr(oxtest_module, "_active_config", None) or _build_config(config_values)
+    session = getattr(oxtest_module, "_active_session", None) or _build_session(config)
+    session.testscollected = len(summary.get("results", []))
+    _invoke_hook("oxtest_sessionfinish", session, summary.get("failed", 0))
+    reporter = oxtest_module._TerminalReporter()
+    _invoke_hook("oxtest_terminal_summary", reporter, summary.get("failed", 0), config)
+
+
+def apply_collection_hooks(items):
+    _ensure_oxtest_module()
+    oxtest_module = sys.modules["oxtest"]
+    config = getattr(oxtest_module, "_active_config", None) or _build_config({})
+    wrapped_items = [_dict_to_test_item(item) for item in items]
+    _invoke_hook("oxtest_collection_modifyitems", config, wrapped_items)
+    return [item.to_dict() for item in wrapped_items]
+
+
+def should_ignore_collect(path, config_values=None):
+    path = pathlib.Path(path)
+    _ensure_oxtest_module()
+    _ensure_pytest_module()
+    _load_conftests_for(path)
+    config = getattr(sys.modules["oxtest"], "_active_config", None) or _build_config(config_values)
+    results = _invoke_hook("oxtest_ignore_collect", path, config) or []
+    if isinstance(results, list):
+        return any(bool(value) for value in results if value is not None)
+    return bool(results)
+
+
+def discover_with_hooks(path):
+    path_obj = pathlib.Path(path)
+    _load_conftests_for(path_obj)
+    custom = _invoke_hook("oxtest_collect_file", path_obj, None)
+    if custom is not None:
+        return custom
+    return discover(path)
+
+
+def run_test(path, test_name, config_values=None, next_test_name=None):
     module = load_module(path)
+    oxtest_module = sys.modules["oxtest"]
+    config = getattr(oxtest_module, "_active_config", None) or _build_config(config_values)
+    item = _dict_to_test_item({
+        "file": str(path),
+        "name": _strip_param_id(test_name).split(".")[-1],
+        "full_name": test_name,
+        "marks": [mark["name"] for mark in _get_test_marks(path, test_name)],
+        "extra_keywords": [],
+    })
+    next_item = None
+    if next_test_name:
+        next_item = _dict_to_test_item({
+            "file": str(path),
+            "name": _strip_param_id(next_test_name).split(".")[-1],
+            "full_name": next_test_name,
+            "marks": [mark["name"] for mark in _get_test_marks(path, next_test_name)],
+            "extra_keywords": [],
+        })
     setup_module = _load_attr(module, "setup_module")
     teardown_module = _load_attr(module, "teardown_module")
 
@@ -1301,40 +1736,80 @@ def run_test(path, test_name):
         teardown_method = _load_attr(instance, "teardown_method")
 
         try:
+            _invoke_hook("oxtest_runtest_setup", item)
             _apply_fixture(setup_module, module)
             _apply_fixture(setup_class, cls)
             _apply_fixture(setup_method, instance, base_method_name)
             func = getattr(instance, base_method_name)
+            _invoke_hook("oxtest_runtest_call", item)
             _call_test_with_fixtures(func, module, path, test_name)
+            report = _make_report("call", True, False, False, "")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, ""
         except _SkipTest as err:
+            report = _make_report("call", False, False, True, f"skipped: {err}")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, f"skipped: {err}"
         except _XFailed as err:
+            report = _make_report("call", True, False, False, f"xfail: {err}")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, f"xfail: {err}"
-        except Exception:
-            return False, traceback.format_exc()
+        except KeyboardInterrupt as err:
+            report = _make_report("call", False, True, False, "keyboard interrupt")
+            _invoke_hook("oxtest_keyboard_interrupt", err)
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            raise
+        except Exception as err:
+            output = traceback.format_exc()
+            report = _make_report("call", False, True, False, output)
+            _invoke_hook("oxtest_exception_interact", item, oxtest_module._CallInfo("call", err), report)
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            return False, output
         finally:
             _apply_fixture(teardown_method, instance, base_method_name)
             _apply_fixture(teardown_class, cls)
             _apply_fixture(teardown_module, module)
+            _invoke_hook("oxtest_runtest_teardown", item, next_item)
     else:
         base_test_name = _strip_param_id(test_name)
         setup_function = _load_attr(module, "setup_function")
         teardown_function = _load_attr(module, "teardown_function")
         try:
+            _invoke_hook("oxtest_runtest_setup", item)
             _apply_fixture(setup_module, module)
             _apply_fixture(setup_function, base_test_name)
             func = getattr(module, base_test_name)
+            _invoke_hook("oxtest_runtest_call", item)
             _call_test_with_fixtures(func, module, path, test_name)
+            report = _make_report("call", True, False, False, "")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, ""
         except _SkipTest as err:
+            report = _make_report("call", False, False, True, f"skipped: {err}")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, f"skipped: {err}"
         except _XFailed as err:
+            report = _make_report("call", True, False, False, f"xfail: {err}")
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
             return True, f"xfail: {err}"
-        except Exception:
-            return False, traceback.format_exc()
+        except KeyboardInterrupt as err:
+            report = _make_report("call", False, True, False, "keyboard interrupt")
+            _invoke_hook("oxtest_keyboard_interrupt", err)
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            raise
+        except Exception as err:
+            output = traceback.format_exc()
+            report = _make_report("call", False, True, False, output)
+            _invoke_hook("oxtest_exception_interact", item, oxtest_module._CallInfo("call", err), report)
+            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            return False, output
         finally:
             _apply_fixture(teardown_function, base_test_name)
             _apply_fixture(teardown_module, module)
-"#;
+            _invoke_hook("oxtest_runtest_teardown", item, next_item)
 
+
+def run_test_marshaled(path, test_name, config_values=None, next_test_name=None):
+    passed, output = run_test(path, test_name, config_values, next_test_name)
+    return json.dumps({"passed": passed, "output": output})
+"#;
