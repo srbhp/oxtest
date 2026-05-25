@@ -30,7 +30,7 @@ jobs:
         run: cargo build --locked
 
       - name: Run Cargo tests
-        run: cargo test --locked
+        run: cargo test --locked -- --test-threads=1
 
       - name: Run debug binary against tests
-        run: ./target/debug/oxtest tests
+        run: ./target/debug/cobratest tests

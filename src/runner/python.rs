@@ -2020,4 +2020,14 @@ def run_test_marshaled(path, test_name, config_values=None, next_test_name=None)
 
 def get_builtin_fixtures():
     return list(_BUILTIN_FIXTURES)
+
+
+def _clear_cached_conftests():
+    """Clear conftest modules from sys.modules to avoid state leakage between test runs."""
+    modules_to_remove = [
+        name for name in list(sys.modules.keys()) 
+        if name.startswith("cobratest_conftest_")
+    ]
+    for module_name in modules_to_remove:
+        del sys.modules[module_name]
 "#;
