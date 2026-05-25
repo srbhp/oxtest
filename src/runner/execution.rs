@@ -78,7 +78,7 @@ fn summary_to_py<'py>(py: Python<'py>, summary: &TestSummary) -> PyObject {
 fn import_test_modules(tests: &[TestItem]) -> Result<()> {
     let mut imported_paths = HashSet::new();
     Python::with_gil(|py| {
-        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let helper = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let load_module = helper.getattr("load_module")?;
         for test in tests {
             let path = test.file.to_string_lossy().to_string();
@@ -92,7 +92,7 @@ fn import_test_modules(tests: &[TestItem]) -> Result<()> {
 
 fn apply_collection_hooks(tests: Vec<TestItem>) -> Result<Vec<TestItem>> {
     Python::with_gil(|py| {
-        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let helper = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let py_tests = PyList::empty(py);
         for test in &tests {
             py_tests.append(test_item_to_py(py, test))?;
@@ -134,7 +134,7 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     import_test_modules(&tests)?;
 
     Python::with_gil(|py| -> Result<()> {
-        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let helper = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let begin = helper.getattr("begin_test_session")?;
         begin.call1((path, config_to_py(py, &config)))?;
         Ok(())
@@ -160,7 +160,7 @@ pub fn run_tests(path: &str, config: RunConfig) -> Result<TestSummary> {
     let summary = TestSummary { results, passed, failed };
 
     Python::with_gil(|py| -> Result<()> {
-        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let helper = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let finish = helper.getattr("finish_test_session")?;
         finish.call1((summary_to_py(py, &summary), config_to_py(py, &config)))?;
         Ok(())
@@ -231,7 +231,7 @@ pub fn run_test_item(test: &TestItem, next_test: Option<&TestItem>, config: &Run
 
 fn run_test(test: &TestItem, next_test: Option<&TestItem>, config: &RunConfig) -> Result<(bool, String)> {
     Python::with_gil(|py| {
-        let helper = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let helper = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let run_test = helper.getattr("run_test_marshaled")?;
         let next_name = next_test.map(|item| item.full_name.clone());
         let result = run_test.call1((

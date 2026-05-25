@@ -73,11 +73,11 @@ def _is_fixture_decorator(decorator):
             return False
         value = decorator.value
         return (
-            (isinstance(value, ast.Name) and value.id in ("pytest", "mark", "oxtest"))
+            (isinstance(value, ast.Name) and value.id in ("pytest", "mark", "cobratest"))
             or (
                 isinstance(value, ast.Attribute)
                 and isinstance(value.value, ast.Name)
-                and value.value.id in ("pytest", "oxtest")
+                and value.value.id in ("pytest", "cobratest")
                 and value.attr == "mark"
             )
         )
@@ -94,7 +94,7 @@ def _extract_mark_name(decorator):
         value = decorator.value
         if isinstance(value, ast.Name) and value.id == "mark":
             return attr
-        if isinstance(value, ast.Attribute) and value.attr == "mark" and isinstance(value.value, ast.Name) and value.value.id in ("pytest", "oxtest"):
+        if isinstance(value, ast.Attribute) and value.attr == "mark" and isinstance(value.value, ast.Name) and value.value.id in ("pytest", "cobratest"):
             return attr
     return None
 
@@ -160,8 +160,8 @@ _BUILTIN_FIXTURES = {
     "capsysbinary",
     "doctest_namespace",
     "monkeypatch",
-    "oxtestconfig",
-    "oxtester",
+    "cobratestconfig",
+    "cobratester",
     "record_property",
     "record_testsuite_property",
     "recwarn",
@@ -352,7 +352,7 @@ class _Testdir:
         path.write_text(content, encoding="utf-8")
         return path
 
-    def runoxtest(self):
+    def runcobratest(self):
         return _OxtestResult(passed=1, failed=0, skipped=0)
 
 
@@ -441,9 +441,9 @@ def _get_builtin_fixture(module, fixture_name, fixture_names, path, test_name):
                         os.environ[name] = old
 
         return lambda: _track_cleanup(_MonkeyPatch())
-    if fixture_name == "oxtestconfig":
+    if fixture_name == "cobratestconfig":
         return lambda: _Config()
-    if fixture_name == "oxtester":
+    if fixture_name == "cobratester":
         return lambda: _Testdir()
     if fixture_name == "record_property":
         return lambda: _RecordProperty()
@@ -554,9 +554,9 @@ def _module_name_for_path(path, prefix):
 
 
 def _register_loaded_plugin(module, module_name):
-    oxtest_module = sys.modules.get("oxtest")
-    if oxtest_module is not None and hasattr(oxtest_module, "_register_plugin_object"):
-        oxtest_module._register_plugin_object(module, module_name)
+    cobratest_module = sys.modules.get("cobratest")
+    if cobratest_module is not None and hasattr(cobratest_module, "_register_plugin_object"):
+        cobratest_module._register_plugin_object(module, module_name)
 
 
 def _load_python_module(path, prefix):
@@ -569,7 +569,7 @@ def _load_python_module(path, prefix):
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-    module.__oxtest_source_path__ = str(path)
+    module.__cobratest_source_path__ = str(path)
     _register_loaded_plugin(module, module_name)
     return module
 
@@ -590,14 +590,14 @@ def _iter_conftest_paths(path):
 
 def _load_conftests_for(path):
     for conftest_path in _iter_conftest_paths(path):
-        _load_python_module(conftest_path, "oxtest_conftest")
+        _load_python_module(conftest_path, "cobratest_conftest")
 
 
 def _register_loaded_plugins(root_path=None):
     root = pathlib.Path(root_path).resolve() if root_path is not None else None
     for module_name, module in list(sys.modules.items()):
-        if module_name.startswith("oxtest_module_") or module_name.startswith("oxtest_conftest_"):
-            source = getattr(module, "__oxtest_source_path__", None)
+        if module_name.startswith("cobratest_module_") or module_name.startswith("cobratest_conftest_"):
+            source = getattr(module, "__cobratest_source_path__", None)
             if root is not None and source is not None:
                 try:
                     pathlib.Path(source).resolve().relative_to(root)
@@ -609,10 +609,10 @@ def _register_loaded_plugins(root_path=None):
 def load_module(path):
     path = pathlib.Path(path)
     _ensure_package_root(path)
-    _ensure_oxtest_module()
+    _ensure_cobratest_module()
     _ensure_pytest_module()
     _load_conftests_for(path)
-    return _load_python_module(path, "oxtest_module")
+    return _load_python_module(path, "cobratest_module")
 
 
 def _apply_fixture(func, *args):
@@ -650,7 +650,7 @@ def _is_param_call(node):
     if isinstance(func, ast.Name):
         return func.id == "param"
     if isinstance(func, ast.Attribute):
-        return func.attr == "param" and isinstance(func.value, ast.Name) and func.value.id in ("pytest", "oxtest")
+        return func.attr == "param" and isinstance(func.value, ast.Name) and func.value.id in ("pytest", "cobratest")
     return False
 
 
@@ -777,8 +777,8 @@ def _ensure_package_root(path):
             sys.path.insert(0, str(root))
 
 
-def _ensure_oxtest_module():
-    if "oxtest" in sys.modules:
+def _ensure_cobratest_module():
+    if "cobratest" in sys.modules:
         return
     import types
     import importlib
@@ -822,13 +822,13 @@ def _ensure_oxtest_module():
             self.kwargs = dict(kwargs or {})
 
         def __call__(self, func):
-            marks = list(getattr(func, "__oxtest_marks__", []))
+            marks = list(getattr(func, "__cobratest_marks__", []))
             marks.append({"name": self.name, "args": list(self.args), "kwargs": dict(self.kwargs)})
-            func.__oxtest_marks__ = marks
+            func.__cobratest_marks__ = marks
             return func
 
         def __repr__(self):
-            return f"<oxtest mark {self.name}>"
+            return f"<cobratest mark {self.name}>"
 
     class _Mark:
         def __getattr__(self, name):
@@ -846,7 +846,7 @@ def _ensure_oxtest_module():
 
         def __repr__(self):
             if self._pytest_param:
-                return f"oxtest.param({tuple(self)!r}, {self._pytest_param!r})"
+                return f"cobratest.param({tuple(self)!r}, {self._pytest_param!r})"
             return tuple.__repr__(self)
 
     class _Raises:
@@ -916,7 +916,7 @@ def _ensure_oxtest_module():
             raise AssertionError(f"Did not warn with {self.expected_warning}")
 
     def fixture(func):
-        func.__oxtest_fixture__ = True
+        func.__cobratest_fixture__ = True
         return func
 
     def approx(expected, rel=1e-6, abs=1e-12):
@@ -948,7 +948,7 @@ def _ensure_oxtest_module():
 
     def raises(expected, *args, **kwargs):
         if args or kwargs:
-            raise TypeError("oxtest.raises does not support direct call invocation in this shim")
+            raise TypeError("cobratest.raises does not support direct call invocation in this shim")
         return _Raises(expected)
 
     def deprecated_call(func=None, *args, **kwargs):
@@ -966,8 +966,8 @@ def _ensure_oxtest_module():
         return None
 
     _HOOK_SPECS = {
-        "oxtest_collect_file": {"name": "oxtest_collect_file", "firstresult": True},
-        "oxtest_runtest_makereport": {"name": "oxtest_runtest_makereport", "firstresult": True},
+        "cobratest_collect_file": {"name": "cobratest_collect_file", "firstresult": True},
+        "cobratest_runtest_makereport": {"name": "cobratest_runtest_makereport", "firstresult": True},
     }
     _HOOK_IMPLS = {}
     _REGISTERED_PLUGINS = {}
@@ -1186,11 +1186,11 @@ def _ensure_oxtest_module():
 
     def hookspec(func=None, *, firstresult=False):
         def decorator(fn):
-            fn.__oxtest_hookspec__ = {
+            fn.__cobratest_hookspec__ = {
                 "name": fn.__name__,
                 "firstresult": firstresult,
             }
-            _HOOK_SPECS[fn.__name__] = dict(fn.__oxtest_hookspec__)
+            _HOOK_SPECS[fn.__name__] = dict(fn.__cobratest_hookspec__)
             return fn
         if func is None:
             return decorator
@@ -1198,7 +1198,7 @@ def _ensure_oxtest_module():
 
     def hookimpl(func=None, *, specname=None, tryfirst=False, trylast=False, wrapper=False):
         def decorator(fn):
-            fn.__oxtest_hookimpl__ = {
+            fn.__cobratest_hookimpl__ = {
                 "name": specname or fn.__name__,
                 "tryfirst": tryfirst,
                 "trylast": trylast,
@@ -1212,7 +1212,7 @@ def _ensure_oxtest_module():
     def _register_hookspecs_from_object(obj):
         for attr_name in dir(obj):
             value = getattr(obj, attr_name, None)
-            spec = getattr(value, "__oxtest_hookspec__", None)
+            spec = getattr(value, "__cobratest_hookspec__", None)
             if spec:
                 _HOOK_SPECS[spec["name"]] = dict(spec)
 
@@ -1222,7 +1222,7 @@ def _ensure_oxtest_module():
         _register_hookspecs_from_object(plugin)
         for attr_name in dir(plugin):
             value = getattr(plugin, attr_name, None)
-            impl = getattr(value, "__oxtest_hookimpl__", None)
+            impl = getattr(value, "__cobratest_hookimpl__", None)
             if not impl:
                 continue
             entry = {
@@ -1238,15 +1238,15 @@ def _ensure_oxtest_module():
             existing = [entry for entry in _HOOK_IMPLS.get(name, []) if entry["plugin_name"] != plugin_name]
             _HOOK_IMPLS[name] = existing + list(impls)
             _sort_hook_impls(name)
-        for entry in list(_HOOK_IMPLS.get("oxtest_plugin_registered", [])):
+        for entry in list(_HOOK_IMPLS.get("cobratest_plugin_registered", [])):
             entry["func"](plugin, plugin_name, _PLUGIN_MANAGER)
         return plugin
 
     def _reset_hooks():
         _HOOK_SPECS.clear()
         _HOOK_SPECS.update({
-            "oxtest_collect_file": {"name": "oxtest_collect_file", "firstresult": True},
-            "oxtest_runtest_makereport": {"name": "oxtest_runtest_makereport", "firstresult": True},
+            "cobratest_collect_file": {"name": "cobratest_collect_file", "firstresult": True},
+            "cobratest_runtest_makereport": {"name": "cobratest_runtest_makereport", "firstresult": True},
         })
         _HOOK_IMPLS.clear()
         _REGISTERED_PLUGINS.clear()
@@ -1301,7 +1301,7 @@ def _ensure_oxtest_module():
 
     _PLUGIN_MANAGER = _PluginManager()
 
-    module = types.ModuleType("oxtest")
+    module = types.ModuleType("cobratest")
     module.fixture = fixture
     module.hookspec = hookspec
     module.hookimpl = hookimpl
@@ -1354,7 +1354,7 @@ def _ensure_oxtest_module():
     module.freeze_includes = freeze_includes
     module.SkipTest = _SkipTest
     module.XFailed = _XFailed
-    sys.modules["oxtest"] = module
+    sys.modules["cobratest"] = module
 
 
 def _ensure_pytest_module():
@@ -1689,15 +1689,15 @@ def match_markexpr(expr, marks):
 
 
 def _build_config(config_values):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    return oxtest_module._Config(config_values or {})
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
+    return cobratest_module._Config(config_values or {})
 
 
 def _build_session(config, path=None):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    return oxtest_module._Session(config, path=path)
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
+    return cobratest_module._Session(config, path=path)
 
 
 def _append_child(parent, child):
@@ -1706,7 +1706,7 @@ def _append_child(parent, child):
 
 
 def _package_chain_for_path(path, session):
-    oxtest_module = sys.modules["oxtest"]
+    cobratest_module = sys.modules["cobratest"]
     path = pathlib.Path(path).resolve()
     chain = []
     current = path.parent
@@ -1718,7 +1718,7 @@ def _package_chain_for_path(path, session):
     parent = session
     created = []
     for package_path in reversed(chain):
-        package = oxtest_module._Package.from_parent(parent, name=package_path.name, path=package_path)
+        package = cobratest_module._Package.from_parent(parent, name=package_path.name, path=package_path)
         _append_child(parent, package)
         created.append(package)
         parent = package
@@ -1726,14 +1726,14 @@ def _package_chain_for_path(path, session):
 
 
 def _build_collection_item(data, session=None, config=None):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
     path = pathlib.Path(data["file"]).resolve()
     config = config or (session.config if session is not None else _build_config({}))
     if session is None:
         session = _build_session(config, path=path.parent)
     parent, _ = _package_chain_for_path(path, session)
-    module = oxtest_module._Module.from_parent(parent, name=path.name, path=path)
+    module = cobratest_module._Module.from_parent(parent, name=path.name, path=path)
     _append_child(parent, module)
 
     full_name = data["full_name"]
@@ -1743,20 +1743,20 @@ def _build_collection_item(data, session=None, config=None):
 
     if "." in base_name:
         class_name, function_name = base_name.split(".", 1)
-        class_collector = oxtest_module._Class.from_parent(module, name=class_name, path=path)
+        class_collector = cobratest_module._Class.from_parent(module, name=class_name, path=path)
         _append_child(module, class_collector)
         definition_parent = class_collector
     else:
         definition_parent = module
 
-    function_definition = oxtest_module._FunctionDefinition.from_parent(
+    function_definition = cobratest_module._FunctionDefinition.from_parent(
         definition_parent,
         name=function_name,
         path=path,
         full_name=base_name,
     )
     _append_child(definition_parent, function_definition)
-    function = oxtest_module._Function.from_parent(
+    function = cobratest_module._Function.from_parent(
         function_definition,
         name=function_name,
         path=path,
@@ -1770,8 +1770,8 @@ def _build_collection_item(data, session=None, config=None):
 
 
 def _dict_to_test_item(data):
-    session = getattr(sys.modules.get("oxtest"), "_active_session", None)
-    config = getattr(sys.modules.get("oxtest"), "_active_config", None)
+    session = getattr(sys.modules.get("cobratest"), "_active_session", None)
+    config = getattr(sys.modules.get("cobratest"), "_active_config", None)
     return _build_collection_item(data, session=session, config=config)
 
 
@@ -1787,39 +1787,39 @@ def _report_to_dict(report):
 
 
 def _make_report(when, passed, failed, skipped, output):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    return oxtest_module._Report(when, passed, failed, skipped, output)
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
+    return cobratest_module._Report(when, passed, failed, skipped, output)
 
 
 def _invoke_hook(name, *args):
-    _ensure_oxtest_module()
-    return sys.modules["oxtest"]._call_hook(name, *args)
+    _ensure_cobratest_module()
+    return sys.modules["cobratest"]._call_hook(name, *args)
 
 
 def _invoke_hook_with_default(name, default_result, *args):
-    _ensure_oxtest_module()
-    return sys.modules["oxtest"]._call_hook_with_default(name, default_result, *args)
+    _ensure_cobratest_module()
+    return sys.modules["cobratest"]._call_hook_with_default(name, default_result, *args)
 
 
 def begin_test_session(path, config_values):
     path = pathlib.Path(path)
-    _ensure_oxtest_module()
+    _ensure_cobratest_module()
     _ensure_pytest_module()
-    oxtest_module = sys.modules["oxtest"]
-    oxtest_module._reset_hooks()
+    cobratest_module = sys.modules["cobratest"]
+    cobratest_module._reset_hooks()
     _load_conftests_for(path)
     _register_loaded_plugins(path)
     config = _build_config(config_values)
-    parser = oxtest_module._Parser()
-    _invoke_hook("oxtest_addhooks", oxtest_module._plugin_manager)
-    _invoke_hook("oxtest_addoption", parser)
+    parser = cobratest_module._Parser()
+    _invoke_hook("cobratest_addhooks", cobratest_module._plugin_manager)
+    _invoke_hook("cobratest_addoption", parser)
     for name, option in parser.options.items():
         normalized = name.lstrip("-").replace("-", "_")
         config._values.setdefault(normalized, option["default"])
         config._values.setdefault(name, option["default"])
-    _invoke_hook("oxtest_configure", config)
-    headers = _invoke_hook("oxtest_report_header", config) or []
+    _invoke_hook("cobratest_configure", config)
+    headers = _invoke_hook("cobratest_report_header", config) or []
     for header in headers:
         if isinstance(header, str):
             print(header)
@@ -1827,38 +1827,38 @@ def begin_test_session(path, config_values):
             for line in header:
                 print(line)
     session = _build_session(config, path=path)
-    oxtest_module._active_config = config
-    oxtest_module._active_session = session
-    _invoke_hook("oxtest_sessionstart", session)
+    cobratest_module._active_config = config
+    cobratest_module._active_session = session
+    _invoke_hook("cobratest_sessionstart", session)
 
 
 def finish_test_session(summary, config_values):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    config = getattr(oxtest_module, "_active_config", None) or _build_config(config_values)
-    session = getattr(oxtest_module, "_active_session", None) or _build_session(config)
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
+    config = getattr(cobratest_module, "_active_config", None) or _build_config(config_values)
+    session = getattr(cobratest_module, "_active_session", None) or _build_session(config)
     session.testscollected = len(summary.get("results", []))
-    _invoke_hook("oxtest_sessionfinish", session, summary.get("failed", 0))
-    reporter = oxtest_module._TerminalReporter()
-    _invoke_hook("oxtest_terminal_summary", reporter, summary.get("failed", 0), config)
+    _invoke_hook("cobratest_sessionfinish", session, summary.get("failed", 0))
+    reporter = cobratest_module._TerminalReporter()
+    _invoke_hook("cobratest_terminal_summary", reporter, summary.get("failed", 0), config)
 
 
 def apply_collection_hooks(items):
-    _ensure_oxtest_module()
-    oxtest_module = sys.modules["oxtest"]
-    config = getattr(oxtest_module, "_active_config", None) or _build_config({})
+    _ensure_cobratest_module()
+    cobratest_module = sys.modules["cobratest"]
+    config = getattr(cobratest_module, "_active_config", None) or _build_config({})
     wrapped_items = [_dict_to_test_item(item) for item in items]
-    _invoke_hook("oxtest_collection_modifyitems", config, wrapped_items)
+    _invoke_hook("cobratest_collection_modifyitems", config, wrapped_items)
     return [item.to_dict() for item in wrapped_items]
 
 
 def should_ignore_collect(path, config_values=None):
     path = pathlib.Path(path)
-    _ensure_oxtest_module()
+    _ensure_cobratest_module()
     _ensure_pytest_module()
     _load_conftests_for(path)
-    config = getattr(sys.modules["oxtest"], "_active_config", None) or _build_config(config_values)
-    results = _invoke_hook("oxtest_ignore_collect", path, config) or []
+    config = getattr(sys.modules["cobratest"], "_active_config", None) or _build_config(config_values)
+    results = _invoke_hook("cobratest_ignore_collect", path, config) or []
     if isinstance(results, list):
         return any(bool(value) for value in results if value is not None)
     return bool(results)
@@ -1893,11 +1893,11 @@ def _node_to_test_dict(item):
 def discover_with_hooks(path):
     path_obj = pathlib.Path(path)
     _load_conftests_for(path_obj)
-    oxtest_module = sys.modules["oxtest"]
-    config = getattr(oxtest_module, "_active_config", None) or _build_config({})
-    session = getattr(oxtest_module, "_active_session", None) or _build_session(config, path=path_obj.parent)
-    parent = oxtest_module._Module.from_parent(session, name=path_obj.name, path=path_obj)
-    custom = _invoke_hook("oxtest_collect_file", path_obj, parent)
+    cobratest_module = sys.modules["cobratest"]
+    config = getattr(cobratest_module, "_active_config", None) or _build_config({})
+    session = getattr(cobratest_module, "_active_session", None) or _build_session(config, path=path_obj.parent)
+    parent = cobratest_module._Module.from_parent(session, name=path_obj.name, path=path_obj)
+    custom = _invoke_hook("cobratest_collect_file", path_obj, parent)
     if custom is not None:
         normalized = _normalize_collected_result(custom)
         if normalized is not None:
@@ -1907,8 +1907,8 @@ def discover_with_hooks(path):
 
 def run_test(path, test_name, config_values=None, next_test_name=None):
     module = load_module(path)
-    oxtest_module = sys.modules["oxtest"]
-    config = getattr(oxtest_module, "_active_config", None) or _build_config(config_values)
+    cobratest_module = sys.modules["cobratest"]
+    config = getattr(cobratest_module, "_active_config", None) or _build_config(config_values)
     item = _dict_to_test_item({
         "file": str(path),
         "name": _strip_param_id(test_name).split(".")[-1],
@@ -1940,77 +1940,77 @@ def run_test(path, test_name, config_values=None, next_test_name=None):
         teardown_method = _load_attr(instance, "teardown_method")
 
         try:
-            _invoke_hook("oxtest_runtest_setup", item)
+            _invoke_hook("cobratest_runtest_setup", item)
             _apply_fixture(setup_module, module)
             _apply_fixture(setup_class, cls)
             _apply_fixture(setup_method, instance, base_method_name)
             func = getattr(instance, base_method_name)
-            _invoke_hook("oxtest_runtest_call", item)
+            _invoke_hook("cobratest_runtest_call", item)
             _call_test_with_fixtures(func, module, path, test_name)
             report = _make_report("call", True, False, False, "")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, ""
         except _SkipTest as err:
             report = _make_report("call", False, False, True, f"skipped: {err}")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, f"skipped: {err}"
         except _XFailed as err:
             report = _make_report("call", True, False, False, f"xfail: {err}")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, f"xfail: {err}"
         except KeyboardInterrupt as err:
             report = _make_report("call", False, True, False, "keyboard interrupt")
-            _invoke_hook("oxtest_keyboard_interrupt", err)
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            _invoke_hook("cobratest_keyboard_interrupt", err)
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call", err))
             raise
         except Exception as err:
             output = traceback.format_exc()
             report = _make_report("call", False, True, False, output)
-            _invoke_hook("oxtest_exception_interact", item, oxtest_module._CallInfo("call", err), report)
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            _invoke_hook("cobratest_exception_interact", item, cobratest_module._CallInfo("call", err), report)
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call", err))
             return False, output
         finally:
             _apply_fixture(teardown_method, instance, base_method_name)
             _apply_fixture(teardown_class, cls)
             _apply_fixture(teardown_module, module)
-            _invoke_hook("oxtest_runtest_teardown", item, next_item)
+            _invoke_hook("cobratest_runtest_teardown", item, next_item)
     else:
         base_test_name = _strip_param_id(test_name)
         setup_function = _load_attr(module, "setup_function")
         teardown_function = _load_attr(module, "teardown_function")
         try:
-            _invoke_hook("oxtest_runtest_setup", item)
+            _invoke_hook("cobratest_runtest_setup", item)
             _apply_fixture(setup_module, module)
             _apply_fixture(setup_function, base_test_name)
             func = getattr(module, base_test_name)
-            _invoke_hook("oxtest_runtest_call", item)
+            _invoke_hook("cobratest_runtest_call", item)
             _call_test_with_fixtures(func, module, path, test_name)
             report = _make_report("call", True, False, False, "")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, ""
         except _SkipTest as err:
             report = _make_report("call", False, False, True, f"skipped: {err}")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, f"skipped: {err}"
         except _XFailed as err:
             report = _make_report("call", True, False, False, f"xfail: {err}")
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call"))
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call"))
             return True, f"xfail: {err}"
         except KeyboardInterrupt as err:
             report = _make_report("call", False, True, False, "keyboard interrupt")
-            _invoke_hook("oxtest_keyboard_interrupt", err)
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            _invoke_hook("cobratest_keyboard_interrupt", err)
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call", err))
             raise
         except Exception as err:
             output = traceback.format_exc()
             report = _make_report("call", False, True, False, output)
-            _invoke_hook("oxtest_exception_interact", item, oxtest_module._CallInfo("call", err), report)
-            _invoke_hook_with_default("oxtest_runtest_makereport", report, item, oxtest_module._CallInfo("call", err))
+            _invoke_hook("cobratest_exception_interact", item, cobratest_module._CallInfo("call", err), report)
+            _invoke_hook_with_default("cobratest_runtest_makereport", report, item, cobratest_module._CallInfo("call", err))
             return False, output
         finally:
             _apply_fixture(teardown_function, base_test_name)
             _apply_fixture(teardown_module, module)
-            _invoke_hook("oxtest_runtest_teardown", item, next_item)
+            _invoke_hook("cobratest_runtest_teardown", item, next_item)
 
 
 def run_test_marshaled(path, test_name, config_values=None, next_test_name=None):

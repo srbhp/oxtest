@@ -1,4 +1,4 @@
-"""Examples of oxtest-compatible helper functions supported by oxtest.
+"""Examples of cobratest-compatible helper functions supported by cobratest.
 
 This file contains runnable examples for safe usage and commented examples
 for helper functions which are generally meant to demonstrate the API.
@@ -6,61 +6,61 @@ for helper functions which are generally meant to demonstrate the API.
 
 import warnings
 
-import oxtest
+import cobratest
 
-# Example usage of oxtest helpers:
+# Example usage of cobratest helpers:
 #
-# oxtest.approx(0.3)
-# oxtest.fail("failure message")
-# oxtest.skip("reason")
-# oxtest.importorskip("module_name")
-# oxtest.xfail("expected failure")
-# oxtest.exit("bye")
-# oxtest.main(["-q"])
-# oxtest.param(1, id="one")
-# with oxtest.raises(ValueError):
+# cobratest.approx(0.3)
+# cobratest.fail("failure message")
+# cobratest.skip("reason")
+# cobratest.importorskip("module_name")
+# cobratest.xfail("expected failure")
+# cobratest.exit("bye")
+# cobratest.main(["-q"])
+# cobratest.param(1, id="one")
+# with cobratest.raises(ValueError):
 #     raise ValueError("boom")
-# with oxtest.deprecated_call():
+# with cobratest.deprecated_call():
 #     warnings.warn("deprecated", DeprecationWarning)
-# oxtest.register_assert_rewrite("some_module")
-# with oxtest.warns(DeprecationWarning):
+# cobratest.register_assert_rewrite("some_module")
+# with cobratest.warns(DeprecationWarning):
 #     warnings.warn("deprecated", DeprecationWarning)
-# oxtest.freeze_includes("module_name")
+# cobratest.freeze_includes("module_name")
 
 
 def test_approx_example():
-    assert 0.1 + 0.2 == oxtest.approx(0.3)
+    assert 0.1 + 0.2 == cobratest.approx(0.3)
 
 
 def test_fail_example():
-    with oxtest.raises(AssertionError):
-        oxtest.fail("boom")
+    with cobratest.raises(AssertionError):
+        cobratest.fail("boom")
 
 
 def test_skip_example():
-    with oxtest.raises(Exception):
-        oxtest.skip("skip example")
+    with cobratest.raises(Exception):
+        cobratest.skip("skip example")
 
 
 def test_importorskip_example():
-    assert oxtest.importorskip("sys") is not None
+    assert cobratest.importorskip("sys") is not None
 
 
 def test_xfail_example():
-    with oxtest.raises(Exception):
-        oxtest.xfail("expected failure example")
+    with cobratest.raises(Exception):
+        cobratest.xfail("expected failure example")
 
 
 def test_exit_example():
-    with oxtest.raises(SystemExit):
-        oxtest.exit("bye")
+    with cobratest.raises(SystemExit):
+        cobratest.exit("bye")
 
 
-@oxtest.mark.parametrize(
+@cobratest.mark.parametrize(
     "value, expected",
     [
-        oxtest.param(1, 1, id="one"),
-        oxtest.param(2, 2, id="two"),
+        cobratest.param(1, 1, id="one"),
+        cobratest.param(2, 2, id="two"),
     ],
 )
 def test_param_example(value, expected):
@@ -68,7 +68,7 @@ def test_param_example(value, expected):
 
 
 def test_raises_example():
-    with oxtest.raises(ValueError):
+    with cobratest.raises(ValueError):
         raise ValueError("boom")
 
 
@@ -77,45 +77,45 @@ def test_deprecated_call_example():
         warnings.warn("deprecated", DeprecationWarning)
         return 1
 
-    result = oxtest.deprecated_call(old_function)
+    result = cobratest.deprecated_call(old_function)
     assert result == 1
 
 
 def test_register_assert_rewrite_and_freeze_includes_example():
-    assert oxtest.register_assert_rewrite("some_module") is None
-    assert oxtest.freeze_includes("some_module") is None
+    assert cobratest.register_assert_rewrite("some_module") is None
+    assert cobratest.freeze_includes("some_module") is None
 
 
 def test_warns_example():
-    with oxtest.warns(DeprecationWarning):
+    with cobratest.warns(DeprecationWarning):
         warnings.warn("deprecated", DeprecationWarning)
 
 
-@oxtest.fixture
+@cobratest.fixture
 def my_fruit_fixture():
     return "apple"
 
 
-@oxtest.mark.usefixtures("my_fruit_fixture")
+@cobratest.mark.usefixtures("my_fruit_fixture")
 def test_usefixtures_example():
     assert True
 
 
-@oxtest.mark.skip(reason="skip example")
+@cobratest.mark.skip(reason="skip example")
 def test_skip_example_mark():
     assert False
 
 
-@oxtest.mark.skipif(True, reason="skipif example")
+@cobratest.mark.skipif(True, reason="skipif example")
 def test_skipif_example_mark():
     assert False
 
 
-@oxtest.mark.xfail(reason="expected failure example")
+@cobratest.mark.xfail(reason="expected failure example")
 def test_xfail_example_mark():
     raise AssertionError("boom")
 
 
-@oxtest.mark.custom
+@cobratest.mark.custom
 def test_custom_mark_example():
     assert True

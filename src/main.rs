@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use oxtest::{
+use cobratest::{
     list_fixtures,
     list_fixtures_per_test,
     list_markers,
@@ -12,7 +12,7 @@ use oxtest::{
 use serde_json::to_string_pretty;
 
 #[derive(Parser)]
-#[command(name = "oxtest", version, author, about = "Rust-powered Python test runner using PyO3 and pytest-style CLI")]
+#[command(name = "cobratest", version, author, about = "Rust-powered Python test runner using PyO3 and pytest-style CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

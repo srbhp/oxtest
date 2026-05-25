@@ -1,4 +1,4 @@
-"""Allow running the installed oxtest executable via `python -m oxtest`."""
+"""Allow running the installed cobratest executable via `python -m cobratest`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def _binary_name() -> str:
-    return "oxtest.exe" if os.name == "nt" else "oxtest"
+    return "cobratest.exe" if os.name == "nt" else "cobratest"
 
 
 def _binary_path() -> Path:
@@ -20,7 +20,7 @@ def _binary_path() -> Path:
 
     binary = Path(scripts_dir) / _binary_name()
     if not binary.exists():
-        raise FileNotFoundError(f"Installed oxtest executable not found at {binary}")
+        raise FileNotFoundError(f"Installed cobratest executable not found at {binary}")
     return binary
 
 

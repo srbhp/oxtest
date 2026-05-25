@@ -1,4 +1,4 @@
-# oxtest.fixture examples for built-in fixtures
+# cobratest.fixture examples for built-in fixtures
 
 
 def test_capfd_example(capfd):
@@ -32,9 +32,9 @@ def test_capsysbinary_example(capsysbinary):
     assert out == b"hello\n"
 
 
-def test_config_cache_example(oxtestconfig):
-    oxtestconfig.cache.set("example/value", 42)
-    assert oxtestconfig.cache.get("example/value", None) == 42
+def test_config_cache_example(cobratestconfig):
+    cobratestconfig.cache.set("example/value", 42)
+    assert cobratestconfig.cache.get("example/value", None) == 42
 
 
 def test_doctest_namespace_example(doctest_namespace):
@@ -51,13 +51,13 @@ def test_monkeypatch_example(monkeypatch):
     assert os.getenv("MY_VAR") == "123"
 
 
-def test_oxtestconfig_example(oxtestconfig):
-    assert oxtestconfig.getoption("verbose") >= 0
+def test_cobratestconfig_example(cobratestconfig):
+    assert cobratestconfig.getoption("verbose") >= 0
 
 
-def test_oxtester_example(oxtester):
-    oxtester.makepyfile("def test_pass(): pass")
-    result = oxtester.runoxtest()
+def test_cobratester_example(cobratester):
+    cobratester.makepyfile("def test_pass(): pass")
+    result = cobratester.runcobratest()
     result.assert_outcomes(passed=1)
 
 
@@ -91,7 +91,7 @@ def test_subtests_example(subtests):
 
 def test_testdir_example(testdir):
     testdir.makepyfile("def test_pass(): pass")
-    result = testdir.runoxtest()
+    result = testdir.runcobratest()
     result.assert_outcomes(passed=1)
 
 

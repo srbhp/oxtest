@@ -1,4 +1,4 @@
-import oxtest
+import cobratest
 
 
 def test_hello_example():
@@ -25,12 +25,12 @@ class Fruit:
         return self.name == other.name
 
 
-@oxtest.fixture
+@cobratest.fixture
 def my_fruit():
     return Fruit("apple")
 
 
-@oxtest.fixture
+@cobratest.fixture
 def fruit_basket(my_fruit):
     return [Fruit("banana"), my_fruit]
 

@@ -3,7 +3,7 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "oxtest"
+name = "cobratest"
 dynamic = ["version"]
 description = "Rust-powered Python test runner using PyO3"
 readme = "README.md"

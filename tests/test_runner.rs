@@ -1,4 +1,4 @@
-use oxtest::{discover_tests, list_fixtures, list_fixtures_per_test, run_tests, CaptureMode, RunConfig};
+use cobratest::{discover_tests, list_fixtures, list_fixtures_per_test, run_tests, CaptureMode, RunConfig};
 use std::fs;
 use tempfile::tempdir;
 
@@ -146,24 +146,24 @@ def test_with_fixture(my_fixture):
 }
 
 #[test]
-fn run_tests_executes_oxtest_fixture_dependent_test() {
+fn run_tests_executes_cobratest_fixture_dependent_test() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("test_oxtest_fixture.py");
+    let path = dir.path().join("test_cobratest_fixture.py");
     fs::write(
         &path,
         r#"
-import oxtest
+import cobratest
 
-@oxtest.fixture
+@cobratest.fixture
 def my_fixture():
     return 42
 
-@oxtest.fixture
+@cobratest.fixture
 def my_other_fixture(my_fixture):
     return my_fixture * 2
 
 
-def test_with_oxtest_fixtures(my_fixture, my_other_fixture):
+def test_with_cobratest_fixtures(my_fixture, my_other_fixture):
     assert my_fixture == 42
     assert my_other_fixture == 84
 "#,
@@ -176,23 +176,23 @@ def test_with_oxtest_fixtures(my_fixture, my_other_fixture):
     assert_eq!(summary.passed, 1);
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.results.len(), 1);
-    assert_eq!(summary.results[0].full_name, "test_with_oxtest_fixtures");
+    assert_eq!(summary.results[0].full_name, "test_with_cobratest_fixtures");
 }
 
 #[test]
-fn run_tests_supports_oxtest_mark_parametrize() {
+fn run_tests_supports_cobratest_mark_parametrize() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("test_oxtest_mark.py");
+    let path = dir.path().join("test_cobratest_mark.py");
     fs::write(
         &path,
         r#"
-import oxtest
+import cobratest
 
-@oxtest.mark.parametrize(
+@cobratest.mark.parametrize(
     "value, expected",
     [
-        oxtest.param(1, 1, id="one"),
-        oxtest.param(2, 2, id="two"),
+        cobratest.param(1, 1, id="one"),
+        cobratest.param(2, 2, id="two"),
     ],
 )
 def test_param_example(value, expected):
@@ -214,35 +214,35 @@ def test_param_example(value, expected):
 }
 
 #[test]
-fn run_tests_supports_oxtest_mark_behavior() {
+fn run_tests_supports_cobratest_mark_behavior() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("test_oxtest_mark_behavior.py");
+    let path = dir.path().join("test_cobratest_mark_behavior.py");
     fs::write(
         &path,
         r#"
-import oxtest
+import cobratest
 
-@oxtest.fixture
+@cobratest.fixture
 def my_fixture():
     return 42
 
-@oxtest.mark.usefixtures("my_fixture")
+@cobratest.mark.usefixtures("my_fixture")
 def test_usefixtures():
     assert True
 
-@oxtest.mark.skip(reason="skip example")
+@cobratest.mark.skip(reason="skip example")
 def test_skip():
     assert False
 
-@oxtest.mark.skipif(True, reason="skipif example")
+@cobratest.mark.skipif(True, reason="skipif example")
 def test_skipif():
     assert False
 
-@oxtest.mark.xfail(reason="expected failure")
+@cobratest.mark.xfail(reason="expected failure")
 def test_xfail():
     raise AssertionError("boom")
 
-@oxtest.mark.custom
+@cobratest.mark.custom
 def test_custom_mark():
     assert True
 "#,
@@ -321,7 +321,7 @@ def test_xfail():
 }
 
 #[test]
-fn discover_tests_respects_oxtest_ignore_collect_hook() {
+fn discover_tests_respects_cobratest_ignore_collect_hook() {
     let dir = tempdir().unwrap();
     let conftest = dir.path().join("conftest.py");
     let kept = dir.path().join("test_kept.py");
@@ -330,10 +330,10 @@ fn discover_tests_respects_oxtest_ignore_collect_hook() {
     fs::write(
         &conftest,
         r#"
-import oxtest
+import cobratest
 
-@oxtest.hookimpl
-def oxtest_ignore_collect(collection_path, config):
+@cobratest.hookimpl
+def cobratest_ignore_collect(collection_path, config):
     return collection_path.name == "test_ignored.py"
 "#,
     )
@@ -350,7 +350,7 @@ def oxtest_ignore_collect(collection_path, config):
 }
 
 #[test]
-fn run_tests_executes_oxtest_hook_lifecycle() {
+fn run_tests_executes_cobratest_hook_lifecycle() {
     let dir = tempdir().unwrap();
     let conftest = dir.path().join("conftest.py");
     let path = dir.path().join("test_hooks_runtime.py");
@@ -361,7 +361,7 @@ fn run_tests_executes_oxtest_hook_lifecycle() {
         format!(
             r#"
 import pathlib
-import oxtest
+import cobratest
 
 LOG = pathlib.Path(r"{log}")
 
@@ -370,73 +370,73 @@ def _log(message):
         handle.write(message + "\n")
 
 class ExampleSpecs:
-    @oxtest.hookspec(firstresult=True)
-    def oxtest_example_transform(self, value):
+    @cobratest.hookspec(firstresult=True)
+    def cobratest_example_transform(self, value):
         """Return a transformed value."""
 
-@oxtest.hookimpl
-def oxtest_addhooks(pluginmanager):
+@cobratest.hookimpl
+def cobratest_addhooks(pluginmanager):
     pluginmanager.add_hookspecs(ExampleSpecs)
     _log("addhooks")
 
-@oxtest.hookimpl
-def oxtest_plugin_registered(plugin, plugin_name, manager):
+@cobratest.hookimpl
+def cobratest_plugin_registered(plugin, plugin_name, manager):
     _log(f"registered:{{plugin_name}}")
 
-@oxtest.hookimpl
-def oxtest_addoption(parser):
+@cobratest.hookimpl
+def cobratest_addoption(parser):
     parser.addoption("--demo-flag", action="store_true", default=True, help="demo")
     _log("addoption")
 
-@oxtest.hookimpl
-def oxtest_configure(config):
+@cobratest.hookimpl
+def cobratest_configure(config):
     _log(f"configure:{{config.getoption('--demo-flag')}}")
 
-@oxtest.hookimpl
-def oxtest_report_header(config):
+@cobratest.hookimpl
+def cobratest_report_header(config):
     _log("report_header")
     return ["hook header"]
 
-@oxtest.hookimpl
-def oxtest_sessionstart(session):
+@cobratest.hookimpl
+def cobratest_sessionstart(session):
     _log("sessionstart")
 
-@oxtest.hookimpl
-def oxtest_collection_modifyitems(config, items):
+@cobratest.hookimpl
+def cobratest_collection_modifyitems(config, items):
     _log(f"modifyitems:{{len(items)}}")
     for item in items:
         item.add_marker("hooked")
 
-@oxtest.hookimpl
-def oxtest_runtest_setup(item):
+@cobratest.hookimpl
+def cobratest_runtest_setup(item):
     _log(f"setup:{{item.full_name}}")
 
-@oxtest.hookimpl
-def oxtest_runtest_call(item):
+@cobratest.hookimpl
+def cobratest_runtest_call(item):
     _log(f"call:{{item.full_name}}")
 
-@oxtest.hookimpl
-def oxtest_runtest_teardown(item, nextitem):
+@cobratest.hookimpl
+def cobratest_runtest_teardown(item, nextitem):
     next_name = getattr(nextitem, "full_name", None)
     _log(f"teardown:{{item.full_name}}:{{next_name}}")
 
-@oxtest.hookimpl(wrapper=True)
-def oxtest_runtest_makereport(item, call):
+@cobratest.hookimpl(wrapper=True)
+def cobratest_runtest_makereport(item, call):
     _log(f"makereport-before:{{item.full_name}}")
     outcome = yield
     report = outcome.get_result()
     _log(f"makereport-after:{{item.full_name}}:{{report.outcome}}")
 
-@oxtest.hookimpl
-def oxtest_exception_interact(node, call, report):
+@cobratest.hookimpl
+def cobratest_exception_interact(node, call, report):
     _log(f"exception:{{node.full_name}}:{{report.outcome}}")
 
-@oxtest.hookimpl
-def oxtest_sessionfinish(session, exitstatus):
+@cobratest.hookimpl
+def cobratest_sessionfinish(session, exitstatus):
     _log(f"sessionfinish:{{exitstatus}}")
 
-@oxtest.hookimpl
-def oxtest_terminal_summary(terminalreporter, exitstatus, config):
+@cobratest.hookimpl
+def cobratest_terminal_summary(terminalreporter, exitstatus, config):
     _log(f"terminal_summary:{{exitstatus}}")
 "#,
             log = log_path.display()
@@ -499,7 +499,7 @@ fn run_tests_exposes_collection_tree_objects() {
         format!(
             r#"
 import pathlib
-import oxtest
+import cobratest
 
 LOG = pathlib.Path(r"{log}")
 
@@ -507,51 +507,51 @@ def _log(message):
     with LOG.open("a", encoding="utf-8") as handle:
         handle.write(message + "\n")
 
-assert issubclass(oxtest.Collector, oxtest.Node)
-assert issubclass(oxtest.Item, oxtest.Node)
-assert issubclass(oxtest.File, oxtest.FSCollector)
-assert issubclass(oxtest.FSCollector, oxtest.Collector)
-assert issubclass(oxtest.Session, oxtest.Collector)
-assert issubclass(oxtest.Package, oxtest.FSCollector)
-assert issubclass(oxtest.Module, oxtest.File)
-assert issubclass(oxtest.Class, oxtest.Collector)
-assert issubclass(oxtest.Function, oxtest.Item)
-assert issubclass(oxtest.FunctionDefinition, oxtest.Collector)
+assert issubclass(cobratest.Collector, cobratest.Node)
+assert issubclass(cobratest.Item, cobratest.Node)
+assert issubclass(cobratest.File, cobratest.FSCollector)
+assert issubclass(cobratest.FSCollector, cobratest.Collector)
+assert issubclass(cobratest.Session, cobratest.Collector)
+assert issubclass(cobratest.Package, cobratest.FSCollector)
+assert issubclass(cobratest.Module, cobratest.File)
+assert issubclass(cobratest.Class, cobratest.Collector)
+assert issubclass(cobratest.Function, cobratest.Item)
+assert issubclass(cobratest.FunctionDefinition, cobratest.Collector)
 
-@oxtest.hookimpl
-def oxtest_sessionstart(session):
+@cobratest.hookimpl
+def cobratest_sessionstart(session):
     _log(
         "session:"
-        + str(isinstance(session, oxtest.Session))
+        + str(isinstance(session, cobratest.Session))
         + ":"
-        + str(isinstance(session, oxtest.Collector))
+        + str(isinstance(session, cobratest.Collector))
         + ":"
-        + str(isinstance(session, oxtest.Node))
+        + str(isinstance(session, cobratest.Node))
     )
 
-@oxtest.hookimpl
-def oxtest_collect_file(file_path, parent):
+@cobratest.hookimpl
+def cobratest_collect_file(file_path, parent):
     if file_path.name == "test_tree.py":
         _log(
             "collect_file:"
             + type(parent).__name__
             + ":"
-            + str(isinstance(parent, oxtest.Module))
+            + str(isinstance(parent, cobratest.Module))
             + ":"
-            + str(isinstance(parent, oxtest.File))
+            + str(isinstance(parent, cobratest.File))
         )
     return None
 
-@oxtest.hookimpl
-def oxtest_collection_modifyitems(config, items):
+@cobratest.hookimpl
+def cobratest_collection_modifyitems(config, items):
     for item in items:
         if item.full_name == "TestExample.test_child":
             chain = ">".join(type(node).__name__ for node in item.listchain())
             _log("item_type:" + type(item).__name__)
             _log("function_parent:" + type(item.parent).__name__)
-            _log("class_parent:" + type(item.getparent(oxtest.Class)).__name__)
-            _log("module_parent:" + type(item.getparent(oxtest.Module)).__name__)
-            package = item.getparent(oxtest.Package)
+            _log("class_parent:" + type(item.getparent(cobratest.Class)).__name__)
+            _log("module_parent:" + type(item.getparent(cobratest.Module)).__name__)
+            package = item.getparent(cobratest.Package)
             _log("package_parent:" + getattr(package, "name", ""))
             _log("chain:" + chain)
 "#,
@@ -563,14 +563,14 @@ def oxtest_collection_modifyitems(config, items):
     fs::write(
         &path,
         r#"
-import oxtest
+import cobratest
 
 def test_top_level():
-    assert issubclass(oxtest.FunctionDefinition, oxtest.Collector)
+    assert issubclass(cobratest.FunctionDefinition, cobratest.Collector)
 
 class TestExample:
     def test_child(self):
-        assert issubclass(oxtest.Module, oxtest.File)
+        assert issubclass(cobratest.Module, cobratest.File)
 "#,
     )
     .unwrap();

@@ -16,11 +16,11 @@ pub fn discover_tests(path: &str, config: &RunConfig) -> Result<Vec<TestItem>> {
     }
 
     Python::with_gil(|py| -> Result<()> {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
-        let reset = module.getattr("_ensure_oxtest_module")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
+        let reset = module.getattr("_ensure_cobratest_module")?;
         reset.call0()?;
-        let oxtest = PyModule::import(py, "oxtest")?;
-        oxtest.getattr("_reset_hooks")?.call0()?;
+        let cobratest = PyModule::import(py, "cobratest")?;
+        cobratest.getattr("_reset_hooks")?.call0()?;
         Ok(())
     })?;
 
@@ -84,7 +84,7 @@ pub fn list_markers(path: &str, config: &RunConfig) -> Result<Vec<String>> {
 
 pub fn list_fixtures(path: &str, config: &RunConfig) -> Result<Vec<String>> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let list_fn = module.getattr("list_fixtures")?;
         let result = list_fn.call1((path,))?;
         let fixtures: Vec<String> = result.extract()?;
@@ -99,7 +99,7 @@ pub fn list_fixtures(path: &str, config: &RunConfig) -> Result<Vec<String>> {
 
 pub fn list_fixtures_per_test(path: &str, config: &RunConfig) -> Result<Vec<FixtureUsage>> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let list_fn = module.getattr("fixtures_per_test")?;
         let result = list_fn.call1((path,))?;
         let list = result
@@ -153,7 +153,7 @@ fn matches_ignore_path(path: &Path, base: &Path, ignore: &Path) -> bool {
 
 fn discover_file(path: &Path) -> Result<Option<Vec<TestItem>>> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let discover = module.getattr("discover_with_hooks")?;
         let result = discover.call1((path.to_str().unwrap(),))?;
         let list = result
@@ -183,7 +183,7 @@ fn discover_file(path: &Path) -> Result<Option<Vec<TestItem>>> {
 
 fn hook_ignores_path(path: &Path, config: &RunConfig) -> Result<bool> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let ignore = module.getattr("should_ignore_collect")?;
         let config_dict = PyDict::new(py);
         config_dict.set_item("k_expr", config.k_expr.clone())?;
@@ -206,7 +206,7 @@ fn hook_ignores_path(path: &Path, config: &RunConfig) -> Result<bool> {
 
 fn match_keyword(expr: &str, test_name: &str, extra_names: &[String]) -> Result<bool> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let matcher = module.getattr("match_keyword")?;
         let extra = extra_names.to_object(py);
         let result = matcher.call1((expr, test_name, extra))?;
@@ -217,7 +217,7 @@ fn match_keyword(expr: &str, test_name: &str, extra_names: &[String]) -> Result<
 
 fn match_markexpr(expr: &str, marks: &[String]) -> Result<bool> {
     Python::with_gil(|py| {
-        let module = PyModule::from_code(py, PY_HELPER, "oxtest_helper.py", "oxtest_helper")?;
+        let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
         let matcher = module.getattr("match_markexpr")?;
         let py_marks = marks.to_object(py);
         let result = matcher.call1((expr, py_marks))?;
