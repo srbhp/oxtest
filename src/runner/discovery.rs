@@ -88,9 +88,18 @@ pub fn list_fixtures(path: &str, config: &RunConfig) -> Result<Vec<String>> {
         let list_fn = module.getattr("list_fixtures")?;
         let result = list_fn.call1((path,))?;
         let fixtures: Vec<String> = result.extract()?;
+        
+        // Get built-in fixtures to filter them out
+        let builtin_fn = module.getattr("get_builtin_fixtures")?;
+        let builtin_result = builtin_fn.call0()?;
+        let builtin_fixtures: Vec<String> = builtin_result.extract()?;
+        let builtin_set: std::collections::HashSet<String> = builtin_fixtures.into_iter().collect();
+        
         let mut fixtures: Vec<String> = fixtures
             .into_iter()
-            .filter(|fixture| config.verbose > 0 || !fixture.starts_with('_'))
+            .filter(|fixture| {
+                (config.verbose > 0 || !fixture.starts_with('_')) && !builtin_set.contains(fixture)
+            })
             .collect();
         fixtures.sort();
         Ok(fixtures)
@@ -100,6 +109,13 @@ pub fn list_fixtures(path: &str, config: &RunConfig) -> Result<Vec<String>> {
 pub fn list_fixtures_per_test(path: &str, config: &RunConfig) -> Result<Vec<FixtureUsage>> {
     Python::with_gil(|py| {
         let module = PyModule::from_code(py, PY_HELPER, "cobratest_helper.py", "cobratest_helper")?;
+        
+        // Get built-in fixtures to filter them out
+        let builtin_fn = module.getattr("get_builtin_fixtures")?;
+        let builtin_result = builtin_fn.call0()?;
+        let builtin_fixtures: Vec<String> = builtin_result.extract()?;
+        let builtin_set: std::collections::HashSet<String> = builtin_fixtures.into_iter().collect();
+        
         let list_fn = module.getattr("fixtures_per_test")?;
         let result = list_fn.call1((path,))?;
         let list = result
@@ -115,7 +131,9 @@ pub fn list_fixtures_per_test(path: &str, config: &RunConfig) -> Result<Vec<Fixt
             let fixtures: Vec<String> = dict.get_item("fixtures").unwrap().extract()?;
             let fixtures: Vec<String> = fixtures
                 .into_iter()
-                .filter(|fixture| config.verbose > 0 || !fixture.starts_with('_'))
+                .filter(|fixture| {
+                    (config.verbose > 0 || !fixture.starts_with('_')) && !builtin_set.contains(fixture)
+                })
                 .collect();
             usage.push(FixtureUsage { test, fixtures });
         }

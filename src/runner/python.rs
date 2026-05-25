@@ -2016,4 +2016,8 @@ def run_test(path, test_name, config_values=None, next_test_name=None):
 def run_test_marshaled(path, test_name, config_values=None, next_test_name=None):
     passed, output = run_test(path, test_name, config_values, next_test_name)
     return json.dumps({"passed": passed, "output": output})
+
+
+def get_builtin_fixtures():
+    return list(_BUILTIN_FIXTURES)
 "#;
